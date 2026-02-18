@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: infra
+  labels:
+    app: nginx
+    managed-by: endfield
+spec:
+  type: ClusterIP
+  selector:
+    app: nginx
+  ports:
+    - name: main
+      port: 80
+      targetPort: 80
+      protocol: TCP
