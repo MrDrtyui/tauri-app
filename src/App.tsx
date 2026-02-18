@@ -1,15 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-
-// ─── Tauri bridge (fallback для dev без Tauri) ────────────────────────────────
-const isTauri = typeof window !== "undefined" && window.__TAURI__ !== undefined;
-const invoke = isTauri
-  ? window.__TAURI__.invoke
-  : async (cmd, args) => {
-      // Dev-заглушка — имитирует ответ
-      if (cmd === "open_folder_dialog") return "/home/user/infra";
-      if (cmd === "scan_yaml_files") return MOCK_SCAN_RESULT;
-      return null;
-    };
+import { invoke } from "@tauri-apps/api/core";
 
 // ─── Mock данные для dev без Tauri ────────────────────────────────────────────
 const MOCK_SCAN_RESULT = {
@@ -99,111 +89,208 @@ const MOCK_SCAN_RESULT = {
   ],
 };
 
+// ─── Safe invoke: пробует Tauri, при ошибке fallback на mock ─────────────────
+async function safeInvoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    console.warn(`[mock] invoke("${cmd}") failed, using mock:`, e);
+    if (cmd === "open_folder_dialog") return "/home/user/infra" as T;
+    if (cmd === "scan_yaml_files") return MOCK_SCAN_RESULT as T;
+    if (cmd === "read_yaml_file")
+      return "# mock yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: mock\n" as T;
+    throw e;
+  }
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface YamlNode {
+  id: string;
+  label: string;
+  kind: string;
+  image: string;
+  type_id: string;
+  typeId: string;
+  namespace: string;
+  file_path: string;
+  filePath: string;
+  replicas: number | null;
+  x: number;
+  y: number;
+}
+
+interface ScanResult {
+  nodes: YamlNode[];
+  project_path: string;
+  errors: string[];
+}
+
+interface NodeType {
+  label: string;
+  bg: string;
+  border: string;
+  color: string;
+  shadow: string;
+  glow: string;
+  accent: string;
+  dot: string;
+  icon: string;
+}
+
 // ─── Node type визуальные пресеты ─────────────────────────────────────────────
-const NODE_TYPES = {
+const NODE_TYPES: Record<string, NodeType> = {
   gateway: {
     label: "Gateway",
-    bg: "#1e3a5f",
-    border: "rgba(96,165,250,0.55)",
-    color: "white",
-    shadow: "rgba(59,130,246,0.35)",
+    bg: "linear-gradient(135deg, #0f2847 0%, #1a3a6b 100%)",
+    border: "rgba(96,165,250,0.6)",
+    color: "#bfdbfe",
+    shadow: "rgba(59,130,246,0.4)",
+    glow: "rgba(59,130,246,0.7)",
+    accent: "#3b82f6",
+    dot: "#60a5fa",
     icon: "⬡",
   },
   service: {
     label: "Service",
-    bg: "#0e4a3a",
-    border: "rgba(52,211,153,0.55)",
+    bg: "linear-gradient(135deg, #052e1c 0%, #0d4a2e 100%)",
+    border: "rgba(52,211,153,0.6)",
     color: "#6ee7b7",
-    shadow: "rgba(16,185,129,0.2)",
+    shadow: "rgba(16,185,129,0.35)",
+    glow: "rgba(16,185,129,0.65)",
+    accent: "#10b981",
+    dot: "#34d399",
     icon: "◈",
   },
   database: {
     label: "Database",
-    bg: "#152645",
+    bg: "linear-gradient(135deg, #0a1f3d 0%, #112d58 100%)",
     border: "rgba(59,130,246,0.55)",
     color: "#93c5fd",
-    shadow: "rgba(59,130,246,0.25)",
-    icon: "▤",
+    shadow: "rgba(37,99,235,0.4)",
+    glow: "rgba(37,99,235,0.65)",
+    accent: "#2563eb",
+    dot: "#60a5fa",
+    icon: "◫",
   },
   cache: {
     label: "Cache",
-    bg: "#3d1a0a",
-    border: "rgba(251,146,60,0.55)",
-    color: "#fdba74",
-    shadow: "rgba(234,88,12,0.3)",
-    icon: "▤",
+    bg: "linear-gradient(135deg, #2d1000 0%, #4a1f00 100%)",
+    border: "rgba(251,146,60,0.6)",
+    color: "#fed7aa",
+    shadow: "rgba(234,88,12,0.4)",
+    glow: "rgba(234,88,12,0.65)",
+    accent: "#ea580c",
+    dot: "#fb923c",
+    icon: "⚡",
   },
   queue: {
     label: "Queue",
-    bg: "#2d0a0a",
-    border: "rgba(220,38,38,0.55)",
+    bg: "linear-gradient(135deg, #2d0000 0%, #4a0a0a 100%)",
+    border: "rgba(239,68,68,0.6)",
     color: "#fca5a5",
-    shadow: "rgba(220,38,38,0.25)",
-    icon: "⊞",
+    shadow: "rgba(220,38,38,0.4)",
+    glow: "rgba(220,38,38,0.65)",
+    accent: "#dc2626",
+    dot: "#f87171",
+    icon: "⊛",
   },
   monitoring: {
     label: "Monitoring",
-    bg: "#1a1a3e",
-    border: "rgba(167,139,250,0.55)",
-    color: "#c4b5fd",
-    shadow: "rgba(139,92,246,0.25)",
+    bg: "linear-gradient(135deg, #12003d 0%, #1e0a5e 100%)",
+    border: "rgba(167,139,250,0.6)",
+    color: "#ddd6fe",
+    shadow: "rgba(124,58,237,0.4)",
+    glow: "rgba(124,58,237,0.65)",
+    accent: "#7c3aed",
+    dot: "#a78bfa",
     icon: "◎",
   },
   config: {
     label: "Config",
-    bg: "#1a2e1a",
-    border: "rgba(74,222,128,0.4)",
-    color: "#86efac",
-    shadow: "rgba(34,197,94,0.2)",
+    bg: "linear-gradient(135deg, #1f1a00 0%, #332c00 100%)",
+    border: "rgba(234,179,8,0.55)",
+    color: "#fef08a",
+    shadow: "rgba(202,138,4,0.35)",
+    glow: "rgba(202,138,4,0.6)",
+    accent: "#ca8a04",
+    dot: "#facc15",
     icon: "≡",
   },
-  service_default: {
-    label: "Service",
-    bg: "#1a1a2e",
+  custom: {
+    label: "Custom",
+    bg: "linear-gradient(135deg, #0f1117 0%, #1a1d27 100%)",
     border: "rgba(100,116,139,0.5)",
-    color: "#94a3b8",
-    shadow: "rgba(0,0,0,0.4)",
+    color: "#cbd5e1",
+    shadow: "rgba(71,85,105,0.35)",
+    glow: "rgba(71,85,105,0.55)",
+    accent: "#475569",
+    dot: "#64748b",
     icon: "◇",
   },
 };
 
-function getType(typeId) {
-  return NODE_TYPES[typeId] || NODE_TYPES.service_default;
+function getType(typeId: string): NodeType {
+  return NODE_TYPES[typeId] || NODE_TYPES.custom;
+}
+
+// ─── Нормализация ноды из бэкенда (snake_case → camelCase) ───────────────────
+function normalizeNode(node: Partial<YamlNode>): YamlNode {
+  return {
+    ...node,
+    id: node.id || "",
+    label: node.label || "",
+    kind: node.kind || "",
+    image: node.image || "",
+    namespace: node.namespace || "default",
+    replicas: node.replicas ?? null,
+    x: node.x ?? 0,
+    y: node.y ?? 0,
+    typeId: node.typeId || (node as any).type_id || "service",
+    filePath: node.filePath || (node as any).file_path || "",
+    type_id: (node as any).type_id || node.typeId || "service",
+    file_path: (node as any).file_path || node.filePath || "",
+  } as YamlNode;
 }
 
 // ─── Авто-расстановка нод в сетку ────────────────────────────────────────────
-function autoLayout(nodes) {
-  const cols = 4;
-  const xStep = 22;
-  const yStep = 18;
-  const xStart = 5;
-  const yStart = 8;
+function autoLayout(nodes: Partial<YamlNode>[]): YamlNode[] {
+  const cols = 4,
+    xStep = 22,
+    yStep = 18,
+    xStart = 5,
+    yStart = 8;
   return nodes.map((node, i) => ({
-    ...node,
+    ...normalizeNode(node),
     x: xStart + (i % cols) * xStep,
     y: yStart + Math.floor(i / cols) * yStep,
   }));
 }
 
-// ─── Project Selector Screen ──────────────────────────────────────────────────
-function ProjectSelector({ onProjectLoaded }) {
+// ─── Project Selector ─────────────────────────────────────────────────────────
+function ProjectSelector({
+  onProjectLoaded,
+}: {
+  onProjectLoaded: (r: ScanResult) => void;
+}) {
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [recentPaths] = useState([
-    "~/projects/myapp/infra",
-    "~/work/k8s-configs",
-  ]);
+  const [error, setError] = useState<string | null>(null);
+  const recentPaths = ["~/projects/myapp/infra", "~/work/k8s-configs"];
 
   const handleOpen = async () => {
     setLoading(true);
     setError(null);
     try {
-      const folderPath = await invoke("open_folder_dialog");
+      const folderPath = await safeInvoke<string>("open_folder_dialog");
       if (!folderPath) {
         setLoading(false);
         return;
       }
-      const result = await invoke("scan_yaml_files", { folderPath });
+      const result = await safeInvoke<ScanResult>("scan_yaml_files", {
+        folderPath,
+      });
       onProjectLoaded(result);
     } catch (e) {
       setError(String(e));
@@ -212,11 +299,13 @@ function ProjectSelector({ onProjectLoaded }) {
     }
   };
 
-  const handleRecent = async (path) => {
+  const handleRecent = async (path: string) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await invoke("scan_yaml_files", { folderPath: path });
+      const result = await safeInvoke<ScanResult>("scan_yaml_files", {
+        folderPath: path,
+      });
       onProjectLoaded(result);
     } catch (e) {
       setError(String(e));
@@ -240,7 +329,6 @@ function ProjectSelector({ onProjectLoaded }) {
         overflow: "hidden",
       }}
     >
-      {/* bg grid */}
       <div
         style={{
           position: "absolute",
@@ -250,7 +338,6 @@ function ProjectSelector({ onProjectLoaded }) {
           backgroundSize: "40px 40px",
         }}
       />
-      {/* glow */}
       <div
         style={{
           position: "absolute",
@@ -265,7 +352,6 @@ function ProjectSelector({ onProjectLoaded }) {
           pointerEvents: "none",
         }}
       />
-
       <div
         style={{
           position: "relative",
@@ -354,7 +440,6 @@ function ProjectSelector({ onProjectLoaded }) {
             Endfield
           </span>
         </div>
-
         <p
           style={{
             color: "rgba(255,255,255,0.35)",
@@ -368,8 +453,7 @@ function ProjectSelector({ onProjectLoaded }) {
           <br />
           из YAML конфигов
         </p>
-
-        {/* Main open button */}
+        {/* Open button */}
         <button
           onClick={handleOpen}
           disabled={loading}
@@ -411,81 +495,69 @@ function ProjectSelector({ onProjectLoaded }) {
             </>
           ) : (
             <>
-              <span style={{ fontSize: "1.1vw" }}>⊞</span>
-              Открыть папку с конфигами
+              <span style={{ fontSize: "1.1vw" }}>⊞</span>Открыть папку с
+              конфигами
             </>
           )}
         </button>
-
         {/* Recent */}
-        {recentPaths.length > 0 && (
-          <div style={{ width: "100%" }}>
-            <div
-              style={{
-                color: "rgba(255,255,255,0.25)",
-                fontSize: "0.7vw",
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-                marginBottom: "0.6vw",
-              }}
-            >
-              Недавние
-            </div>
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.35vw",
-              }}
-            >
-              {recentPaths.map((p) => (
-                <div
-                  key={p}
-                  onClick={() => handleRecent(p)}
+        <div style={{ width: "100%" }}>
+          <div
+            style={{
+              color: "rgba(255,255,255,0.25)",
+              fontSize: "0.7vw",
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+              marginBottom: "0.6vw",
+            }}
+          >
+            Недавние
+          </div>
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: "0.35vw" }}
+          >
+            {recentPaths.map((p) => (
+              <div
+                key={p}
+                onClick={() => handleRecent(p)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.6vw",
+                  padding: "0.55vw 0.8vw",
+                  borderRadius: "0.5vw",
+                  border: "1px solid rgba(255,255,255,0.06)",
+                  background: "rgba(255,255,255,0.03)",
+                  cursor: "pointer",
+                  transition: "all 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "rgba(59,130,246,0.08)";
+                  e.currentTarget.style.borderColor = "rgba(96,165,250,0.3)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "rgba(255,255,255,0.03)";
+                  e.currentTarget.style.borderColor = "rgba(255,255,255,0.06)";
+                }}
+              >
+                <span
+                  style={{ fontSize: "0.8vw", color: "rgba(255,255,255,0.3)" }}
+                >
+                  ⊙
+                </span>
+                <span
                   style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.6vw",
-                    padding: "0.55vw 0.8vw",
-                    borderRadius: "0.5vw",
-                    border: "1px solid rgba(255,255,255,0.06)",
-                    background: "rgba(255,255,255,0.03)",
-                    cursor: "pointer",
-                    transition: "all 0.12s",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "rgba(59,130,246,0.08)";
-                    e.currentTarget.style.borderColor = "rgba(96,165,250,0.3)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "rgba(255,255,255,0.03)";
-                    e.currentTarget.style.borderColor =
-                      "rgba(255,255,255,0.06)";
+                    fontSize: "0.78vw",
+                    color: "rgba(255,255,255,0.5)",
+                    fontFamily: "monospace",
                   }}
                 >
-                  <span
-                    style={{
-                      fontSize: "0.8vw",
-                      color: "rgba(255,255,255,0.3)",
-                    }}
-                  >
-                    ⊙
-                  </span>
-                  <span
-                    style={{
-                      fontSize: "0.78vw",
-                      color: "rgba(255,255,255,0.5)",
-                      fontFamily: "monospace",
-                    }}
-                  >
-                    {p}
-                  </span>
-                </div>
-              ))}
-            </div>
+                  {p}
+                </span>
+              </div>
+            ))}
           </div>
-        )}
-
+        </div>
         {error && (
           <div
             style={{
@@ -506,8 +578,14 @@ function ProjectSelector({ onProjectLoaded }) {
   );
 }
 
-// ─── Scan result toast ────────────────────────────────────────────────────────
-function ScanToast({ result, onDismiss }) {
+// ─── Scan Toast ───────────────────────────────────────────────────────────────
+function ScanToast({
+  result,
+  onDismiss,
+}: {
+  result: ScanResult;
+  onDismiss: () => void;
+}) {
   useEffect(() => {
     const t = setTimeout(onDismiss, 4000);
     return () => clearTimeout(t);
@@ -536,7 +614,7 @@ function ScanToast({ result, onDismiss }) {
       }}
     >
       <span style={{ fontWeight: 600 }}>
-        {hasErrors ? "⚠" : "✓"} Загружено {result.nodes.length} нод
+        {hasErrors ? "⚠" : "✓"} Загружено {result.nodes.length} fields
       </span>
       <span style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.7vw" }}>
         {result.project_path}
@@ -550,22 +628,34 @@ function ScanToast({ result, onDismiss }) {
   );
 }
 
-// ─── Node Icon ────────────────────────────────────────────────────────────────
-function NodeIcon({ typeId }) {
-  const t = getType(typeId);
-  return (
-    <span style={{ fontSize: "0.85vw", marginRight: "0.35vw", opacity: 0.8 }}>
-      {t.icon}
-    </span>
-  );
+// ─── Context Menu ─────────────────────────────────────────────────────────────
+interface ContextMenuState {
+  visible: boolean;
+  x: number;
+  y: number;
+  nodeId: string | null;
+  label: string;
+  kind: string;
+  namespace: string;
 }
 
-// ─── Context Menu ─────────────────────────────────────────────────────────────
-function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
-  const [hoveredItem, setHoveredItem] = useState(null);
+function ContextMenu({
+  menu,
+  onClose,
+  onDelete,
+  onRename,
+  onOpenFile,
+}: {
+  menu: ContextMenuState;
+  onClose: () => void;
+  onDelete: (id: string) => void;
+  onRename: (id: string, label: string) => void;
+  onOpenFile: (id: string) => void;
+}) {
+  const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [newName, setNewName] = useState(menu.label);
-  const inputRef = useRef(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
   }, [renaming]);
@@ -585,7 +675,7 @@ function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
       label: "Открыть YAML",
       color: "#93c5fd",
       action: () => {
-        onOpenFile(menu.nodeId);
+        onOpenFile(menu.nodeId!);
         onClose();
       },
     },
@@ -596,7 +686,7 @@ function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
       label: "Удалить",
       color: "#f87171",
       action: () => {
-        onDelete(menu.nodeId);
+        onDelete(menu.nodeId!);
         onClose();
       },
     },
@@ -623,13 +713,11 @@ function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
           padding: "0.4vw",
           background: "rgba(20,28,46,0.78)",
           backdropFilter: "blur(28px) saturate(180%)",
-          WebkitBackdropFilter: "blur(28px) saturate(180%)",
           border: "1px solid rgba(255,255,255,0.13)",
-          boxShadow:
-            "0 8px 40px rgba(0,0,0,0.55), 0 1.5px 0 rgba(255,255,255,0.06) inset",
+          boxShadow: "0 8px 40px rgba(0,0,0,0.55)",
           animation: "ctxIn 0.15s cubic-bezier(0.34,1.4,0.64,1) both",
           transformOrigin: "top left",
-          fontFamily: "-apple-system, BlinkMacSystemFont, monospace",
+          fontFamily: "monospace",
         }}
         onContextMenu={(e) => e.preventDefault()}
       >
@@ -647,12 +735,10 @@ function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
               onChange={(e) => setNewName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  onRename(menu.nodeId, newName);
+                  onRename(menu.nodeId!, newName);
                   onClose();
                 }
-                if (e.key === "Escape") {
-                  setRenaming(false);
-                }
+                if (e.key === "Escape") setRenaming(false);
               }}
               style={{
                 width: "100%",
@@ -729,7 +815,7 @@ function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
                   fontSize: "0.95vw",
                   color:
                     hoveredItem === item.id
-                      ? item.color
+                      ? item.color!
                       : "rgba(255,255,255,0.4)",
                   width: "1.1vw",
                   textAlign: "center",
@@ -743,7 +829,7 @@ function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
                   fontSize: "0.8vw",
                   color:
                     hoveredItem === item.id
-                      ? item.color
+                      ? item.color!
                       : "rgba(255,255,255,0.82)",
                   fontWeight: item.id === "delete" ? 500 : 400,
                 }}
@@ -758,14 +844,20 @@ function ContextMenu({ menu, onClose, onDelete, onRename, onOpenFile }) {
   );
 }
 
-// ─── YAML Preview Modal ───────────────────────────────────────────────────────
-function YamlModal({ node, onClose }) {
+// ─── YAML Modal ───────────────────────────────────────────────────────────────
+function YamlModal({ node, onClose }: { node: YamlNode; onClose: () => void }) {
   const [content, setContent] = useState("Загрузка...");
   useEffect(() => {
-    invoke("read_yaml_file", { filePath: node.filePath })
-      .then((c) => setContent(c))
+    const path = node.filePath || node.file_path || "";
+    if (!path) {
+      setContent("# Путь к файлу не указан");
+      return;
+    }
+    safeInvoke<string>("read_yaml_file", { filePath: path })
+      .then(setContent)
       .catch((e) => setContent(`Ошибка: ${e}`));
   }, [node.filePath]);
+
   return (
     <div
       style={{
@@ -826,7 +918,7 @@ function YamlModal({ node, onClose }) {
                 marginLeft: "0.6vw",
               }}
             >
-              {node.filePath}
+              {node.filePath || node.file_path}
             </span>
           </div>
           <button
@@ -870,16 +962,20 @@ function YamlModal({ node, onClose }) {
 }
 
 // ─── Add Node Modal ───────────────────────────────────────────────────────────
-function AddNodeModal({ onClose, onAdd }) {
+function AddNodeModal({
+  onClose,
+  onAdd,
+}: {
+  onClose: () => void;
+  onAdd: (n: { name: string; typeId: string }) => void;
+}) {
   const [name, setName] = useState("");
   const [selectedTypeId, setSelectedTypeId] = useState("service");
-  const inputRef = useRef(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
-  const typeEntries = Object.entries(NODE_TYPES).filter(
-    ([id]) => id !== "service_default",
-  );
+  const typeEntries = Object.entries(NODE_TYPES);
   const handleAdd = () => {
     if (!name.trim()) {
       inputRef.current?.focus();
@@ -888,6 +984,7 @@ function AddNodeModal({ onClose, onAdd }) {
     onAdd({ name: name.trim(), typeId: selectedTypeId });
     onClose();
   };
+
   return (
     <div
       style={{
@@ -908,7 +1005,6 @@ function AddNodeModal({ onClose, onAdd }) {
           inset: 0,
           background: "rgba(6,12,22,0.65)",
           backdropFilter: "blur(8px)",
-          WebkitBackdropFilter: "blur(8px)",
         }}
       />
       <div
@@ -1016,7 +1112,7 @@ function AddNodeModal({ onClose, onAdd }) {
                 marginBottom: "0.4vw",
               }}
             >
-              Тип (image)
+              Тип
             </label>
             <div
               style={{
@@ -1034,12 +1130,10 @@ function AddNodeModal({ onClose, onAdd }) {
                     borderRadius: "0.45vw",
                     border:
                       selectedTypeId === id
-                        ? `1.5px solid ${t.border.replace("0.55)", "0.9)")}`
+                        ? `1.5px solid ${t.border.replace("0.6)", "0.95)")}`
                         : "1.5px solid rgba(255,255,255,0.06)",
                     background:
-                      selectedTypeId === id
-                        ? `${t.bg}cc`
-                        : "rgba(255,255,255,0.03)",
+                      selectedTypeId === id ? t.bg : "rgba(255,255,255,0.03)",
                     cursor: "pointer",
                     display: "flex",
                     flexDirection: "column",
@@ -1048,8 +1142,32 @@ function AddNodeModal({ onClose, onAdd }) {
                     boxShadow:
                       selectedTypeId === id ? `0 0 10px ${t.shadow}` : "none",
                     transition: "all 0.12s",
+                    position: "relative",
+                    overflow: "hidden",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (selectedTypeId !== id)
+                      e.currentTarget.style.background =
+                        "rgba(255,255,255,0.06)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (selectedTypeId !== id)
+                      e.currentTarget.style.background =
+                        "rgba(255,255,255,0.03)";
                   }}
                 >
+                  {selectedTypeId === id && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: "0.15vw",
+                        background: t.accent,
+                      }}
+                    />
+                  )}
                   <span
                     style={{
                       fontSize: "0.9vw",
@@ -1076,7 +1194,6 @@ function AddNodeModal({ onClose, onAdd }) {
               ))}
             </div>
           </div>
-          {/* Preview */}
           <div
             style={{
               display: "flex",
@@ -1151,7 +1268,17 @@ function AddNodeModal({ onClose, onAdd }) {
 }
 
 // ─── Draggable Node ───────────────────────────────────────────────────────────
-function DraggableNode({ node, onDragStart, isDragging, onContextMenu }) {
+function DraggableNode({
+  node,
+  onDragStart,
+  isDragging,
+  onContextMenu,
+}: {
+  node: YamlNode;
+  onDragStart: (e: React.MouseEvent, id: string) => void;
+  isDragging: boolean;
+  onContextMenu: (e: React.MouseEvent, node: YamlNode) => void;
+}) {
   const t = getType(node.typeId);
   return (
     <div
@@ -1187,13 +1314,17 @@ function DraggableNode({ node, onDragStart, isDragging, onContextMenu }) {
           display: "flex",
           alignItems: "center",
           outline: isDragging
-            ? `1.5px solid ${t.border.replace("0.55)", "0.9)")}`
+            ? `1.5px solid ${t.border.replace("0.6)", "0.9)")}`
             : "none",
           transform: isDragging ? "scale(1.05)" : "scale(1)",
           transition: isDragging ? "transform 0.05s" : "transform 0.12s",
         }}
       >
-        <NodeIcon typeId={node.typeId} />
+        <span
+          style={{ fontSize: "0.85vw", marginRight: "0.35vw", opacity: 0.8 }}
+        >
+          {t.icon}
+        </span>
         <div
           style={{ display: "flex", flexDirection: "column", gap: "0.05vw" }}
         >
@@ -1212,11 +1343,11 @@ function DraggableNode({ node, onDragStart, isDragging, onContextMenu }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [screen, setScreen] = useState("selector"); // "selector" | "dashboard"
-  const [project, setProject] = useState(null);
-  const [nodes, setNodes] = useState([]);
-  const [draggingId, setDraggingId] = useState(null);
-  const [contextMenu, setContextMenu] = useState({
+  const [screen, setScreen] = useState<"selector" | "dashboard">("selector");
+  const [project, setProject] = useState<ScanResult | null>(null);
+  const [nodes, setNodes] = useState<YamlNode[]>([]);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     visible: false,
     x: 0,
     y: 0,
@@ -1226,24 +1357,27 @@ export default function App() {
     namespace: "",
   });
   const [showAddModal, setShowAddModal] = useState(false);
-  const [yamlModal, setYamlModal] = useState(null);
-  const [scanToast, setScanToast] = useState(null);
-  const dragState = useRef(null);
-  const containerRef = useRef(null);
+  const [yamlModal, setYamlModal] = useState<YamlNode | null>(null);
+  const [scanToast, setScanToast] = useState<ScanResult | null>(null);
+  const dragState = useRef<{
+    id: string;
+    offsetXpct: number;
+    offsetYpct: number;
+  } | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const handleProjectLoaded = useCallback((result) => {
-    const laid = autoLayout(result.nodes);
-    setNodes(laid);
+  const handleProjectLoaded = useCallback((result: ScanResult) => {
+    setNodes(autoLayout(result.nodes));
     setProject(result);
     setScanToast(result);
     setScreen("dashboard");
   }, []);
 
-  const handleDragStart = useCallback((e, id) => {
+  const handleDragStart = useCallback((e: React.MouseEvent, id: string) => {
     e.preventDefault();
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const nodeRect = e.currentTarget.getBoundingClientRect();
+    const nodeRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     dragState.current = {
       id,
       offsetXpct: ((e.clientX - nodeRect.left) / rect.width) * 100,
@@ -1252,7 +1386,7 @@ export default function App() {
     setDraggingId(id);
   }, []);
 
-  const handleMouseMove = useCallback((e) => {
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!dragState.current || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     const { id, offsetXpct, offsetYpct } = dragState.current;
@@ -1273,59 +1407,66 @@ export default function App() {
     dragState.current = null;
     setDraggingId(null);
   }, []);
-  const handleContextMenu = useCallback((e, node) => {
-    e.preventDefault();
-    setContextMenu({
-      visible: true,
-      x: e.clientX,
-      y: e.clientY,
-      nodeId: node.id,
-      label: node.label,
-      kind: node.kind || "",
-      namespace: node.namespace || "",
-    });
-  }, []);
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, node: YamlNode) => {
+      e.preventDefault();
+      setContextMenu({
+        visible: true,
+        x: e.clientX,
+        y: e.clientY,
+        nodeId: node.id,
+        label: node.label,
+        kind: node.kind || "",
+        namespace: node.namespace || "",
+      });
+    },
+    [],
+  );
   const handleDelete = useCallback(
-    (id) => setNodes((prev) => prev.filter((n) => n.id !== id)),
+    (id: string) => setNodes((prev) => prev.filter((n) => n.id !== id)),
     [],
   );
   const handleRename = useCallback(
-    (id, label) =>
+    (id: string, label: string) =>
       setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, label } : n))),
     [],
   );
   const handleOpenFile = useCallback(
-    (id) => {
+    (id: string) => {
       const node = nodes.find((n) => n.id === id);
-      if (node?.filePath) setYamlModal(node);
+      if (node?.filePath || node?.file_path)
+        setYamlModal({ ...node, filePath: node.filePath || node.file_path });
     },
     [nodes],
   );
-  const handleAddNode = useCallback(({ name, typeId }) => {
-    const newNode = {
-      id: `manual-${Date.now()}`,
-      label: name,
-      kind: "",
-      image: "",
-      type_id: typeId,
-      typeId,
-      namespace: "default",
-      filePath: "",
-      replicas: null,
-      x: 35 + Math.random() * 20,
-      y: 35 + Math.random() * 20,
-    };
-    setNodes((prev) => [...prev, newNode]);
-  }, []);
+  const handleAddNode = useCallback(
+    ({ name, typeId }: { name: string; typeId: string }) => {
+      const newNode: YamlNode = {
+        id: `manual-${Date.now()}`,
+        label: name,
+        kind: "",
+        image: "",
+        type_id: typeId,
+        typeId,
+        namespace: "default",
+        file_path: "",
+        filePath: "",
+        replicas: null,
+        x: 35 + Math.random() * 20,
+        y: 35 + Math.random() * 20,
+      };
+      setNodes((prev) => [...prev, newNode]);
+    },
+    [],
+  );
 
-  if (screen === "selector") {
+  if (screen === "selector")
     return (
       <>
         <ProjectSelector onProjectLoaded={handleProjectLoaded} />
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } } @keyframes ctxIn { from { opacity:0; transform:scale(0.88); } to { opacity:1; transform:scale(1); } } * { box-sizing: border-box; }`}</style>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}@keyframes ctxIn{from{opacity:0;transform:scale(0.88)}to{opacity:1;transform:scale(1)}}*{box-sizing:border-box}`}</style>
       </>
     );
-  }
 
   const projectName = project?.project_path?.split("/").pop() || "Project";
 
@@ -1464,10 +1605,13 @@ export default function App() {
                 color: "#94a3b8",
                 cursor: "pointer",
                 whiteSpace: "nowrap",
-                transition: "color 0.1s",
               }}
-              onMouseEnter={(e) => (e.target.style.color = "#e2e8f0")}
-              onMouseLeave={(e) => (e.target.style.color = "#94a3b8")}
+              onMouseEnter={(e) =>
+                ((e.target as HTMLElement).style.color = "#e2e8f0")
+              }
+              onMouseLeave={(e) =>
+                ((e.target as HTMLElement).style.color = "#94a3b8")
+              }
             >
               ‹ Проекты
             </span>
@@ -1509,7 +1653,7 @@ export default function App() {
             <span
               style={{ fontSize: "0.72vw", color: "rgba(255,255,255,0.2)" }}
             >
-              {nodes.length} нод
+              {nodes.length} fields
             </span>
             <button
               onClick={() => setScreen("selector")}
@@ -1926,6 +2070,7 @@ export default function App() {
                   fontSize: "0.8vw",
                   outline: "none",
                   minWidth: 0,
+                  fontFamily: "monospace",
                 }}
                 placeholder="Ask me anything..."
               />
@@ -1941,6 +2086,7 @@ export default function App() {
                   boxShadow: "0 0 12px rgba(59,130,246,0.3)",
                   flexShrink: 0,
                   fontWeight: 600,
+                  fontFamily: "monospace",
                 }}
               >
                 Send

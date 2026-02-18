@@ -31,8 +31,8 @@ pub struct ScanResult {
 
 fn image_to_type_id(image: &str) -> &'static str {
     let img = image.to_lowercase();
-    let img = img.split(':').next().unwrap_or(""); // убираем тег
-    let img = img.split('/').last().unwrap_or("");  // убираем registry/org
+    let img = img.split(':').next().unwrap_or("");
+    let img = img.split('/').last().unwrap_or("");
 
     if img.contains("nginx") || img.contains("traefik") || img.contains("haproxy") || img.contains("envoy") {
         return "gateway";
@@ -59,8 +59,7 @@ fn image_to_type_id(image: &str) -> &'static str {
     "service"
 }
 
-// ─── Minimal YAML parser (без зависимости от serde_yaml если не добавлена) ───
-// Используем базовый построчный парсинг для надёжности
+// ─── Minimal YAML parser (построчный, без внешних зависимостей) ──────────────
 
 fn extract_yaml_field<'a>(content: &'a str, key: &str) -> Option<&'a str> {
     for line in content.lines() {
@@ -104,44 +103,34 @@ fn extract_replicas(content: &str) -> Option<u32> {
     None
 }
 
-// ─── Parse a single YAML file → maybe YamlNode ────────────────────────────────
+// ─── Parse one YAML document string → maybe YamlNode ────────────────────────
 
-fn parse_yaml_file(path: &Path) -> Result<Option<YamlNode>, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("{}: {}", path.display(), e))?;
+fn parse_yaml_doc(doc: &str, path: &Path, doc_index: usize) -> Option<YamlNode> {
+    let kind = extract_yaml_field(doc, "kind")?.to_string();
 
-    // Пропускаем файлы без kind
-    let kind = match extract_yaml_field(&content, "kind") {
-        Some(k) => k.to_string(),
-        None => return Ok(None),
-    };
-
-    // Нас интересуют только ресурсы с контейнерами или Service/Ingress
     let relevant_kinds = [
         "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob",
         "ReplicaSet", "Pod", "Service", "Ingress", "ConfigMap", "Secret",
     ];
     if !relevant_kinds.contains(&kind.as_str()) {
-        return Ok(None);
+        return None;
     }
 
-    let name = extract_yaml_field(&content, "name")
+    let name = extract_yaml_field(doc, "name")
         .unwrap_or("unknown")
         .to_string();
 
-    let namespace = extract_yaml_field(&content, "namespace")
+    let namespace = extract_yaml_field(doc, "namespace")
         .unwrap_or("default")
         .to_string();
 
-    let replicas = extract_replicas(&content);
+    let replicas = extract_replicas(doc);
 
-    // Определяем image и type_id
-    let images = extract_images(&content);
+    let images = extract_images(doc);
     let (image, type_id) = if let Some(first_image) = images.first() {
         let tid = image_to_type_id(first_image).to_string();
         (first_image.clone(), tid)
     } else {
-        // Для Service/Ingress/ConfigMap — по kind
         let tid = match kind.as_str() {
             "Service" | "Ingress" => "gateway",
             "ConfigMap" | "Secret" => "config",
@@ -150,15 +139,15 @@ fn parse_yaml_file(path: &Path) -> Result<Option<YamlNode>, String> {
         (String::new(), tid)
     };
 
+    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
     let id = format!(
-        "{}-{}",
+        "{}-{}-{}",
         name.replace('/', "-").replace('.', "-"),
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file")
+        file_stem,
+        doc_index,
     );
 
-    Ok(Some(YamlNode {
+    Some(YamlNode {
         id,
         label: name,
         kind,
@@ -167,7 +156,25 @@ fn parse_yaml_file(path: &Path) -> Result<Option<YamlNode>, String> {
         namespace,
         file_path: path.to_string_lossy().to_string(),
         replicas,
-    }))
+    })
+}
+
+// ─── Parse a single YAML file (может содержать несколько docs через ---) ──────
+
+fn parse_yaml_file(path: &Path) -> Result<Vec<YamlNode>, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("{}: {}", path.display(), e))?;
+
+    // Разбиваем по "---" разделителям документов
+    let docs: Vec<&str> = content.split("\n---").collect();
+
+    let nodes = docs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, doc)| parse_yaml_doc(doc.trim(), path, i))
+        .collect();
+
+    Ok(nodes)
 }
 
 // ─── Recursive directory scan ─────────────────────────────────────────────────
@@ -184,7 +191,6 @@ fn scan_dir(dir: &Path, nodes: &mut Vec<YamlNode>, errors: &mut Vec<String>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // Пропускаем node_modules, .git и т.д.
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !name.starts_with('.') && name != "node_modules" && name != "vendor" {
                 scan_dir(&path, nodes, errors);
@@ -193,8 +199,7 @@ fn scan_dir(dir: &Path, nodes: &mut Vec<YamlNode>, errors: &mut Vec<String>) {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext == "yaml" || ext == "yml" {
                 match parse_yaml_file(&path) {
-                    Ok(Some(node)) => nodes.push(node),
-                    Ok(None) => {}
+                    Ok(file_nodes) => nodes.extend(file_nodes),
                     Err(e) => errors.push(e),
                 }
             }
@@ -222,20 +227,22 @@ fn scan_yaml_files(folder_path: String) -> ScanResult {
     let mut errors = Vec::new();
 
     if !path.exists() || !path.is_dir() {
-        errors.push(format!("Путь не существует или не является папкой: {}", folder_path));
-        return ScanResult { nodes, project_path: folder_path, errors };
+        errors.push(format!(
+            "Путь не существует или не является папкой: {}",
+            folder_path
+        ));
+        return ScanResult {
+            nodes,
+            project_path: folder_path,
+            errors,
+        };
     }
 
     scan_dir(path, &mut nodes, &mut errors);
 
-    // Авто-расстановка позиций если > 1 ноды
-    let total = nodes.len();
+    // Гарантируем уникальность id
     for (i, node) in nodes.iter_mut().enumerate() {
-        let row = i / 4;
-        let col = i % 4;
-        node.id = format!("{}-{}", node.id, i); // гарантируем уникальность
-        // Позиции будут присвоены на фронтенде
-        let _ = (row, col, total);
+        node.id = format!("{}-{}", node.id, i);
     }
 
     ScanResult {
