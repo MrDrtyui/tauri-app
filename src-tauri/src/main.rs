@@ -57,6 +57,22 @@ pub struct ClusterStatus {
     pub error: Option<String>,
 }
 
+// ─── DeleteResult ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteResult {
+    /// Файлы которые были успешно удалены с диска
+    pub deleted_files: Vec<String>,
+    /// Файлы которые не удалось удалить (не существовали и т.п.)
+    pub missing_files: Vec<String>,
+    /// Ошибки файловых операций
+    pub file_errors: Vec<String>,
+    /// Вывод kubectl delete (если был запущен)
+    pub kubectl_output: Option<String>,
+    /// Ошибка kubectl delete (если была)
+    pub kubectl_error: Option<String>,
+}
+
 // ─── kubectl helper ───────────────────────────────────────────────────────────
 
 fn run_kubectl(args: &[&str]) -> Result<String, String> {
@@ -104,13 +120,43 @@ fn image_to_type_id(image: &str) -> &'static str {
 
 // ─── YAML helpers ─────────────────────────────────────────────────────────────
 
+/// Top-level ключи без отступа: kind:, apiVersion:
 fn extract_yaml_field<'a>(content: &'a str, key: &str) -> Option<&'a str> {
     for line in content.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') { continue; }
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(key) {
             if let Some(rest) = rest.trim().strip_prefix(':') {
                 let value = rest.trim().trim_matches('"').trim_matches('\'');
                 if !value.is_empty() { return Some(value); }
+            }
+        }
+    }
+    None
+}
+
+/// Поля внутри metadata: секции (2 пробела отступа: name, namespace, …)
+fn extract_metadata_field<'a>(content: &'a str, key: &str) -> Option<&'a str> {
+    let mut in_metadata = false;
+    for line in content.lines() {
+        // Вход в metadata
+        if line == "metadata:" || line.trim() == "metadata:" && !line.starts_with(' ') {
+            in_metadata = true;
+            continue;
+        }
+        if !in_metadata { continue; }
+        // Выход из metadata: новый top-level ключ (нет отступа)
+        if !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        // Прямой потомок metadata: ровно 2 пробела, не больше
+        if line.starts_with("  ") && !line.starts_with("   ") {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix(key) {
+                if let Some(rest) = rest.trim().strip_prefix(':') {
+                    let value = rest.trim().trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() { return Some(value); }
+                }
             }
         }
     }
@@ -137,11 +183,13 @@ fn extract_replicas(content: &str) -> Option<u32> {
 
 fn parse_yaml_doc(doc: &str, path: &Path, idx: usize) -> Option<YamlNode> {
     let kind = extract_yaml_field(doc, "kind")?.to_string();
-    let relevant = ["Deployment","StatefulSet","DaemonSet","Job","CronJob","ReplicaSet","Pod","Service","Ingress","ConfigMap","Secret"];
-    if !relevant.contains(&kind.as_str()) { return None; }
+    // Показываем только воркload-ресурсы — Service/ConfigMap/Secret/Ingress
+    // не создают отдельные ноды на схеме (они вспомогательные)
+    let workloads = ["Deployment","StatefulSet","DaemonSet","Job","CronJob","ReplicaSet","Pod"];
+    if !workloads.contains(&kind.as_str()) { return None; }
 
-    let name = extract_yaml_field(doc, "name").unwrap_or("unknown").to_string();
-    let namespace = extract_yaml_field(doc, "namespace").unwrap_or("default").to_string();
+    let name = extract_metadata_field(doc, "name").unwrap_or("unknown").to_string();
+    let namespace = extract_metadata_field(doc, "namespace").unwrap_or("default").to_string();
     let replicas = extract_replicas(doc);
     let images = extract_images(doc);
 
@@ -206,7 +254,7 @@ fn patch_replicas_in_file(file_path: &str, node_label: &str, new_replicas: u32) 
     let mut found = false;
 
     for doc in &docs {
-        let name = extract_yaml_field(doc, "name").unwrap_or("");
+        let name = extract_metadata_field(doc, "name").unwrap_or("");
         if name == node_label && extract_replicas(doc).is_some() {
             let fixed = doc.lines().map(|line| {
                 if line.trim().starts_with("replicas:") {
@@ -245,7 +293,7 @@ async fn open_folder_dialog(app: tauri::AppHandle) -> Option<String> {
 #[tauri::command]
 fn scan_yaml_files(folder_path: String) -> ScanResult {
     let path = Path::new(&folder_path);
-    let mut nodes = Vec::new();
+    let mut nodes: Vec<YamlNode> = Vec::new();
     let mut errors = Vec::new();
 
     if !path.exists() || !path.is_dir() {
@@ -254,10 +302,42 @@ fn scan_yaml_files(folder_path: String) -> ScanResult {
     }
 
     scan_dir(path, &mut nodes, &mut errors);
-    for (i, node) in nodes.iter_mut().enumerate() {
+
+    // Дедупликация: один label+namespace = одна нода.
+    // Если есть дубли (например один файл с multi-doc yaml содержит StatefulSet дважды),
+    // приоритет: StatefulSet > Deployment > DaemonSet > остальное
+    let priority = |kind: &str| match kind {
+        "StatefulSet" => 0,
+        "Deployment"  => 1,
+        "DaemonSet"   => 2,
+        "ReplicaSet"  => 3,
+        "Job"         => 4,
+        "CronJob"     => 5,
+        "Pod"         => 6,
+        _             => 7,
+    };
+
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut deduped: Vec<YamlNode> = Vec::new();
+
+    for node in nodes {
+        let key = format!("{}::{}", node.label, node.namespace);
+        if let Some(&existing_idx) = seen.get(&key) {
+            // Заменяем если новая нода имеет более высокий приоритет
+            if priority(&node.kind) < priority(&deduped[existing_idx].kind) {
+                deduped[existing_idx] = node;
+            }
+        } else {
+            seen.insert(key, deduped.len());
+            deduped.push(node);
+        }
+    }
+
+    // Финальные ID
+    for (i, node) in deduped.iter_mut().enumerate() {
         node.id = format!("{}-{}", node.id, i);
     }
-    ScanResult { nodes, project_path: folder_path, errors }
+    ScanResult { nodes: deduped, project_path: folder_path, errors }
 }
 
 #[tauri::command]
@@ -275,6 +355,84 @@ fn save_yaml_file(file_path: String, content: String) -> Result<(), String> {
         .map_err(|e| format!("Cannot write {}: {}", file_path, e))
 }
 
+/// Удалить yaml-файлы с диска + сделать kubectl delete для каждого файла.
+/// file_paths — список абсолютных путей к yaml-файлам этого поля.
+/// namespace — для kubectl delete на случай если файл уже удалён.
+#[tauri::command]
+fn delete_field_files(file_paths: Vec<String>, namespace: String) -> DeleteResult {
+    let mut result = DeleteResult {
+        deleted_files: vec![],
+        missing_files: vec![],
+        file_errors: vec![],
+        kubectl_output: None,
+        kubectl_error: None,
+    };
+
+    // Сначала kubectl delete — пока файлы ещё есть на диске
+    let mut kubectl_out_lines: Vec<String> = vec![];
+    let mut kubectl_err_lines: Vec<String> = vec![];
+
+    for file_path in &file_paths {
+        let p = Path::new(file_path);
+        if p.exists() {
+            match run_kubectl(&["delete", "-f", file_path, "--ignore-not-found=true"]) {
+                Ok(out) => {
+                    if !out.trim().is_empty() {
+                        kubectl_out_lines.push(format!("✓ {} → {}", file_path, out.trim()));
+                    }
+                },
+                Err(e) => {
+                    kubectl_err_lines.push(format!("✗ {} → {}", file_path, e.trim()));
+                }
+            }
+        }
+    }
+
+    if !kubectl_out_lines.is_empty() {
+        result.kubectl_output = Some(kubectl_out_lines.join("\n"));
+    }
+    if !kubectl_err_lines.is_empty() {
+        result.kubectl_error = Some(kubectl_err_lines.join("\n"));
+    }
+
+    // Потом удаляем файлы с диска
+    for file_path in &file_paths {
+        let p = Path::new(file_path);
+        if !p.exists() {
+            result.missing_files.push(file_path.clone());
+            continue;
+        }
+        match fs::remove_file(p) {
+            Ok(_) => {
+                result.deleted_files.push(file_path.clone());
+                // Удаляем пустую директорию если она опустела
+                if let Some(parent) = p.parent() {
+                    if parent.is_dir() {
+                        let is_empty = fs::read_dir(parent)
+                            .map(|mut d| d.next().is_none())
+                            .unwrap_or(false);
+                        if is_empty {
+                            let _ = fs::remove_dir(parent);
+                        }
+                    }
+                }
+            },
+            Err(e) => {
+                result.file_errors.push(format!("{}: {}", file_path, e));
+            }
+        }
+    }
+
+    result
+}
+
+/// kubectl delete по namespace + label (для ресурсов без известного файла)
+#[tauri::command]
+fn kubectl_delete_by_label(label: String, namespace: String) -> Result<String, String> {
+    // kubectl delete all -l app=<label> -n <namespace>
+    run_kubectl(&["delete", "all", "-l", &format!("app={}", label), "-n", &namespace, "--ignore-not-found=true"])
+}
+
 /// Живой статус кластера: поды + deployments/statefulsets
 #[tauri::command]
 fn get_cluster_status() -> ClusterStatus {
@@ -282,13 +440,11 @@ fn get_cluster_status() -> ClusterStatus {
         return ClusterStatus { fields: vec![], kubectl_available: false, error: Some("kubectl not found".to_string()) };
     }
 
-    // Поды со всеми namespace
     let pods_raw = match run_kubectl(&["get", "pods", "--all-namespaces", "--no-headers"]) {
         Ok(o) => o,
         Err(e) => return ClusterStatus { fields: vec![], kubectl_available: true, error: Some(e) },
     };
 
-    // Парсим поды: NAMESPACE NAME READY STATUS RESTARTS AGE
     let pods: Vec<PodInfo> = pods_raw.lines().filter_map(|line| {
         let p: Vec<&str> = line.split_whitespace().collect();
         if p.len() < 5 { return None; }
@@ -302,7 +458,6 @@ fn get_cluster_status() -> ClusterStatus {
         })
     }).collect();
 
-    // Deployments + StatefulSets: NAMESPACE NAME READY UP-TO-DATE AVAILABLE AGE
     let mut fields: Vec<FieldStatus> = Vec::new();
 
     for resource in &["deployments", "statefulsets"] {
@@ -313,8 +468,6 @@ fn get_cluster_status() -> ClusterStatus {
             let ns = p[0].to_string();
             let name = p[1].to_string();
 
-            // Deployments: NAMESPACE NAME READY UP-TO-DATE AVAILABLE AGE
-            // StatefulSets: NAMESPACE NAME READY AGE
             let (desired, ready, available) = if *resource == "deployments" && p.len() >= 5 {
                 let (r, d) = parse_ready(p[2]);
                 let avail: u32 = p[4].parse().unwrap_or(r);
@@ -337,7 +490,6 @@ fn get_cluster_status() -> ClusterStatus {
     ClusterStatus { fields, kubectl_available: true, error: None }
 }
 
-/// Изменить replicas: патчит YAML → kubectl apply
 #[tauri::command]
 fn apply_replicas(file_path: String, node_label: String, replicas: u32) -> Result<String, String> {
     patch_replicas_in_file(&file_path, &node_label, replicas)?;
@@ -374,6 +526,8 @@ fn main() {
             scan_yaml_files,
             read_yaml_file,
             save_yaml_file,
+            delete_field_files,
+            kubectl_delete_by_label,
             get_cluster_status,
             apply_replicas,
             kubectl_apply,

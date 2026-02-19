@@ -1,8 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
 interface YamlNode {
   id: string;
   label: string;
@@ -17,7 +15,6 @@ interface YamlNode {
   x: number;
   y: number;
 }
-
 interface PodInfo {
   name: string;
   namespace: string;
@@ -26,7 +23,6 @@ interface PodInfo {
   total: number;
   restarts: number;
 }
-
 interface FieldStatus {
   label: string;
   namespace: string;
@@ -36,19 +32,16 @@ interface FieldStatus {
   status: "green" | "yellow" | "red" | "gray";
   pods: PodInfo[];
 }
-
 interface ClusterStatus {
   fields: FieldStatus[];
   kubectl_available: boolean;
   error: string | null;
 }
-
 interface ScanResult {
   nodes: YamlNode[];
   project_path: string;
   errors: string[];
 }
-
 interface ContextMenuState {
   visible: boolean;
   x: number;
@@ -58,14 +51,10 @@ interface ContextMenuState {
   kind: string;
   namespace: string;
 }
-
-// ─── Field Preset Definitions ─────────────────────────────────────────────────
-
 interface FieldEnvVar {
   key: string;
   value: string;
 }
-
 interface FieldPreset {
   typeId: string;
   image: string;
@@ -131,17 +120,22 @@ const FIELD_PRESETS: Record<string, FieldPreset> = {
     image: "confluentinc/cp-kafka:7.6.0",
     defaultPort: 9092,
     kind: "StatefulSet",
-    replicas: 1,
+    replicas: 3,
     description: "Apache Kafka — event streaming",
     folder: "messaging",
     generateConfigMap: true,
     generateService: true,
     storageSize: "20Gi",
     envVars: [
-      { key: "KAFKA_BROKER_ID", value: "1" },
       { key: "KAFKA_ZOOKEEPER_CONNECT", value: "zookeeper:2181" },
-      { key: "KAFKA_ADVERTISED_LISTENERS", value: "PLAINTEXT://kafka:9092" },
-      { key: "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", value: "1" },
+      {
+        key: "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+        value: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT",
+      },
+      { key: "KAFKA_INTER_BROKER_LISTENER_NAME", value: "INTERNAL" },
+      { key: "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", value: "3" },
+      { key: "KAFKA_DEFAULT_REPLICATION_FACTOR", value: "3" },
+      { key: "KAFKA_MIN_INSYNC_REPLICAS", value: "2" },
       { key: "KAFKA_AUTO_CREATE_TOPICS_ENABLE", value: "true" },
     ],
   },
@@ -150,7 +144,7 @@ const FIELD_PRESETS: Record<string, FieldPreset> = {
     image: "redpandadata/redpanda:v23.3.11",
     defaultPort: 9092,
     kind: "StatefulSet",
-    replicas: 1,
+    replicas: 3,
     description: "Redpanda — Kafka-compatible (no ZooKeeper)",
     folder: "messaging",
     generateService: true,
@@ -175,7 +169,7 @@ const FIELD_PRESETS: Record<string, FieldPreset> = {
     defaultPort: 80,
     kind: "Deployment",
     replicas: 1,
-    description: "Nginx Ingress Controller — routes HTTP/S to services",
+    description: "Nginx Ingress Controller",
     folder: "ingress",
     generateService: true,
     envVars: [],
@@ -224,7 +218,17 @@ const FIELD_PRESETS: Record<string, FieldPreset> = {
   },
 };
 
-// ─── YAML Config Generator ────────────────────────────────────────────────────
+// ─── YAML Config Generator — production-grade ─────────────────────────────────
+// Rules:
+//  • StatefulSet: headless Service (clusterIP: None) + ClusterIP Service
+//  • Passwords → Secret, rest → ConfigMap
+//  • livenessProbe + readinessProbe per service type
+//  • Realistic resource requests/limits
+//  • PGDATA with subPath for postgres (required)
+//  • MongoDB: /data/db mountPath
+//  • Kafka: replicas 3, replication factor 3
+//  • Prometheus: /-/healthy /-/ready
+//  • Grafana: /api/health
 
 function generateConfigs(
   name: string,
@@ -236,49 +240,394 @@ function generateConfigs(
   const files: Record<string, string> = {};
   const n = name.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const f = preset.folder;
+  const presetKey =
+    Object.keys(FIELD_PRESETS).find((k) => FIELD_PRESETS[k] === preset) ||
+    "custom";
 
-  // Namespace
   files[`namespace.yaml`] =
     `apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${namespace}\n  labels:\n    managed-by: endfield\n`;
 
-  // ConfigMap
-  if (preset.generateConfigMap && envVars.length > 0) {
-    const data = envVars.map((e) => `  ${e.key}: "${e.value}"`).join("\n");
+  const secretKeys = ["PASSWORD", "SECRET", "KEY", "TOKEN", "PASS"];
+  const sensitiveVars = envVars.filter((e) =>
+    secretKeys.some((k) => e.key.toUpperCase().includes(k)),
+  );
+  const plainVars = envVars.filter(
+    (e) => !secretKeys.some((k) => e.key.toUpperCase().includes(k)),
+  );
+
+  if (sensitiveVars.length > 0) {
+    files[`${f}/${n}-secret.yaml`] =
+      `apiVersion: v1\nkind: Secret\nmetadata:\n  name: ${n}-secret\n  namespace: ${namespace}\n  labels:\n    app: ${n}\n    managed-by: endfield\ntype: Opaque\nstringData:\n${sensitiveVars.map((e) => `  ${e.key}: "${e.value}"`).join("\n")}\n`;
+  }
+  if (preset.generateConfigMap && plainVars.length > 0) {
     files[`${f}/${n}-configmap.yaml`] =
-      `apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ${n}-config\n  namespace: ${namespace}\n  labels:\n    app: ${n}\n    managed-by: endfield\ndata:\n${data}\n`;
+      `apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ${n}-config\n  namespace: ${namespace}\n  labels:\n    app: ${n}\n    managed-by: endfield\ndata:\n${plainVars.map((e) => `  ${e.key}: "${e.value}"`).join("\n")}\n`;
   }
 
-  // Env section
-  const envSection =
-    envVars.length > 0
-      ? `\n        env:\n` +
-        envVars
-          .map((e) =>
-            preset.generateConfigMap
-              ? `          - name: ${e.key}\n            valueFrom:\n              configMapKeyRef:\n                name: ${n}-config\n                key: ${e.key}`
-              : `          - name: ${e.key}\n            value: "${e.value}"`,
-          )
-          .join("\n")
-      : "";
+  const buildEnv = (): string => {
+    const all = [...envVars];
+    if (presetKey === "postgres" && !all.find((e) => e.key === "PGDATA")) {
+      all.push({ key: "PGDATA", value: "/var/lib/postgresql/data/pgdata" });
+    }
+    if (all.length === 0) return "";
+    const lines = ["          env:"];
+    for (const e of all) {
+      const isSensitive = secretKeys.some((k) =>
+        e.key.toUpperCase().includes(k),
+      );
+      if (isSensitive && sensitiveVars.length > 0) {
+        lines.push(
+          `          - name: ${e.key}`,
+          `            valueFrom:`,
+          `              secretKeyRef:`,
+          `                name: ${n}-secret`,
+          `                key: ${e.key}`,
+        );
+      } else if (
+        preset.generateConfigMap &&
+        plainVars.find((v) => v.key === e.key)
+      ) {
+        lines.push(
+          `          - name: ${e.key}`,
+          `            valueFrom:`,
+          `              configMapKeyRef:`,
+          `                name: ${n}-config`,
+          `                key: ${e.key}`,
+        );
+      } else {
+        lines.push(
+          `          - name: ${e.key}`,
+          `            value: "${e.value}"`,
+        );
+      }
+    }
+    return lines.join("\n");
+  };
 
-  const volumeSection = preset.storageSize
-    ? `\n      volumeMounts:\n        - name: data\n          mountPath: /data\n  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: ["ReadWriteOnce"]\n        resources:\n          requests:\n            storage: ${preset.storageSize}`
+  const buildProbes = (): string => {
+    if (presetKey === "postgres")
+      return [
+        `          livenessProbe:`,
+        `            exec:`,
+        `              command:`,
+        `                - bash`,
+        `                - -ec`,
+        `                - 'PGPASSWORD=$POSTGRES_PASSWORD psql -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -c "SELECT 1"'`,
+        `            initialDelaySeconds: 30`,
+        `            periodSeconds: 10`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 6`,
+        `          readinessProbe:`,
+        `            exec:`,
+        `              command:`,
+        `                - bash`,
+        `                - -ec`,
+        `                - 'PGPASSWORD=$POSTGRES_PASSWORD psql -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -c "SELECT 1"'`,
+        `            initialDelaySeconds: 5`,
+        `            periodSeconds: 10`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 6`,
+      ].join("\n");
+    if (presetKey === "mongodb")
+      return [
+        `          livenessProbe:`,
+        `            exec:`,
+        `              command:`,
+        `                - mongosh`,
+        `                - --eval`,
+        `                - "db.adminCommand('ping')"`,
+        `            initialDelaySeconds: 30`,
+        `            periodSeconds: 10`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 6`,
+        `          readinessProbe:`,
+        `            exec:`,
+        `              command:`,
+        `                - mongosh`,
+        `                - --eval`,
+        `                - "db.adminCommand('ping')"`,
+        `            initialDelaySeconds: 5`,
+        `            periodSeconds: 10`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 6`,
+      ].join("\n");
+    if (presetKey === "redis")
+      return [
+        `          livenessProbe:`,
+        `            exec:`,
+        `              command: ["redis-cli", "ping"]`,
+        `            initialDelaySeconds: 20`,
+        `            periodSeconds: 5`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 5`,
+        `          readinessProbe:`,
+        `            exec:`,
+        `              command: ["redis-cli", "ping"]`,
+        `            initialDelaySeconds: 5`,
+        `            periodSeconds: 5`,
+        `            timeoutSeconds: 1`,
+        `            failureThreshold: 5`,
+      ].join("\n");
+    if (presetKey === "kafka" || presetKey === "redpanda")
+      return [
+        `          livenessProbe:`,
+        `            tcpSocket:`,
+        `              port: ${port}`,
+        `            initialDelaySeconds: 60`,
+        `            periodSeconds: 15`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 6`,
+        `          readinessProbe:`,
+        `            tcpSocket:`,
+        `              port: ${port}`,
+        `            initialDelaySeconds: 20`,
+        `            periodSeconds: 10`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 6`,
+      ].join("\n");
+    if (presetKey === "prometheus")
+      return [
+        `          livenessProbe:`,
+        `            httpGet:`,
+        `              path: /-/healthy`,
+        `              port: ${port}`,
+        `            initialDelaySeconds: 30`,
+        `            periodSeconds: 15`,
+        `            timeoutSeconds: 10`,
+        `            failureThreshold: 3`,
+        `          readinessProbe:`,
+        `            httpGet:`,
+        `              path: /-/ready`,
+        `              port: ${port}`,
+        `            initialDelaySeconds: 5`,
+        `            periodSeconds: 5`,
+        `            timeoutSeconds: 4`,
+        `            failureThreshold: 3`,
+      ].join("\n");
+    if (presetKey === "grafana")
+      return [
+        `          livenessProbe:`,
+        `            httpGet:`,
+        `              path: /api/health`,
+        `              port: ${port}`,
+        `            initialDelaySeconds: 30`,
+        `            periodSeconds: 10`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 3`,
+        `          readinessProbe:`,
+        `            httpGet:`,
+        `              path: /api/health`,
+        `              port: ${port}`,
+        `            initialDelaySeconds: 5`,
+        `            periodSeconds: 10`,
+        `            timeoutSeconds: 5`,
+        `            failureThreshold: 3`,
+      ].join("\n");
+    return [
+      `          livenessProbe:`,
+      `            httpGet:`,
+      `              path: /`,
+      `              port: ${port}`,
+      `            initialDelaySeconds: 10`,
+      `            periodSeconds: 10`,
+      `            timeoutSeconds: 5`,
+      `            failureThreshold: 3`,
+      `          readinessProbe:`,
+      `            httpGet:`,
+      `              path: /`,
+      `              port: ${port}`,
+      `            initialDelaySeconds: 5`,
+      `            periodSeconds: 5`,
+      `            timeoutSeconds: 3`,
+      `            failureThreshold: 3`,
+    ].join("\n");
+  };
+
+  const buildResources = (): string => {
+    const m: Record<string, [string, string, string, string]> = {
+      postgres: ["250m", "256Mi", "1000m", "1Gi"],
+      mongodb: ["250m", "256Mi", "1000m", "1Gi"],
+      redis: ["100m", "128Mi", "500m", "512Mi"],
+      kafka: ["500m", "1Gi", "2000m", "4Gi"],
+      redpanda: ["500m", "1Gi", "2000m", "4Gi"],
+      nginx: ["50m", "64Mi", "250m", "256Mi"],
+      "ingress-nginx": ["100m", "128Mi", "500m", "512Mi"],
+      grafana: ["100m", "128Mi", "500m", "512Mi"],
+      prometheus: ["250m", "512Mi", "1000m", "2Gi"],
+      custom: ["50m", "64Mi", "500m", "512Mi"],
+    };
+    const [rc, rm, lc, lm] = m[presetKey] || m.custom;
+    return [
+      `          resources:`,
+      `            requests:`,
+      `              cpu: "${rc}"`,
+      `              memory: "${rm}"`,
+      `            limits:`,
+      `              cpu: "${lc}"`,
+      `              memory: "${lm}"`,
+    ].join("\n");
+  };
+
+  const buildVolumeMount = (): string => {
+    if (!preset.storageSize) return "";
+    if (presetKey === "postgres")
+      return [
+        `          volumeMounts:`,
+        `            - name: data`,
+        `              mountPath: /var/lib/postgresql/data`,
+        `              subPath: pgdata`,
+      ].join("\n");
+    if (presetKey === "mongodb")
+      return [
+        `          volumeMounts:`,
+        `            - name: data`,
+        `              mountPath: /data/db`,
+      ].join("\n");
+    return [
+      `          volumeMounts:`,
+      `            - name: data`,
+      `              mountPath: /data`,
+    ].join("\n");
+  };
+
+  const pvcTemplate = preset.storageSize
+    ? [
+        `  volumeClaimTemplates:`,
+        `    - metadata:`,
+        `        name: data`,
+        `      spec:`,
+        `        accessModes: ["ReadWriteOnce"]`,
+        `        resources:`,
+        `          requests:`,
+        `            storage: ${preset.storageSize}`,
+      ].join("\n")
     : "";
 
-  // Workload
+  const envSection = buildEnv();
+  const probesSection = buildProbes();
+  const resourcesSection = buildResources();
+  const volumeMount = buildVolumeMount();
+
   if (preset.kind === "StatefulSet") {
-    files[`${f}/${n}-statefulset.yaml`] =
-      `apiVersion: apps/v1\nkind: StatefulSet\nmetadata:\n  name: ${n}\n  namespace: ${namespace}\n  labels:\n    app: ${n}\n    managed-by: endfield\nspec:\n  serviceName: ${n}\n  replicas: ${preset.replicas}\n  selector:\n    matchLabels:\n      app: ${n}\n  template:\n    metadata:\n      labels:\n        app: ${n}\n    spec:\n      containers:\n        - name: ${n}\n          image: ${preset.image}\n          ports:\n            - containerPort: ${port}\n              name: main${envSection}\n          resources:\n            requests:\n              memory: "128Mi"\n              cpu: "100m"\n            limits:\n              memory: "512Mi"\n              cpu: "500m"${volumeSection}\n`;
-  } else {
-    files[`${f}/${n}-deployment.yaml`] =
-      `apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ${n}\n  namespace: ${namespace}\n  labels:\n    app: ${n}\n    managed-by: endfield\nspec:\n  replicas: ${preset.replicas}\n  selector:\n    matchLabels:\n      app: ${n}\n  template:\n    metadata:\n      labels:\n        app: ${n}\n    spec:\n      containers:\n        - name: ${n}\n          image: ${preset.image}\n          ports:\n            - containerPort: ${port}${envSection}\n          resources:\n            requests:\n              memory: "64Mi"\n              cpu: "50m"\n            limits:\n              memory: "256Mi"\n              cpu: "250m"\n`;
+    files[`${f}/${n}-headless-svc.yaml`] = [
+      `apiVersion: v1`,
+      `kind: Service`,
+      `metadata:`,
+      `  name: ${n}-headless`,
+      `  namespace: ${namespace}`,
+      `  labels:`,
+      `    app: ${n}`,
+      `    managed-by: endfield`,
+      `spec:`,
+      `  clusterIP: None`,
+      `  selector:`,
+      `    app: ${n}`,
+      `  ports:`,
+      `    - name: main`,
+      `      port: ${port}`,
+      `      targetPort: ${port}`,
+      ``,
+    ].join("\n");
+
+    const parts = [
+      `apiVersion: apps/v1`,
+      `kind: StatefulSet`,
+      `metadata:`,
+      `  name: ${n}`,
+      `  namespace: ${namespace}`,
+      `  labels:`,
+      `    app: ${n}`,
+      `    managed-by: endfield`,
+      `spec:`,
+      `  serviceName: ${n}-headless`,
+      `  replicas: ${preset.replicas}`,
+      `  updateStrategy:`,
+      `    type: RollingUpdate`,
+      `  selector:`,
+      `    matchLabels:`,
+      `      app: ${n}`,
+      `  template:`,
+      `    metadata:`,
+      `      labels:`,
+      `        app: ${n}`,
+      `    spec:`,
+      `      terminationGracePeriodSeconds: 30`,
+      `      securityContext:`,
+      `        fsGroup: 999`,
+      `      containers:`,
+      `        - name: ${n}`,
+      `          image: ${preset.image}`,
+      `          ports:`,
+      `            - containerPort: ${port}`,
+      `              name: main`,
+    ];
+    if (envSection) parts.push(envSection);
+    parts.push(probesSection, resourcesSection);
+    if (volumeMount) parts.push(volumeMount);
+    if (pvcTemplate) parts.push(pvcTemplate);
+    parts.push(``);
+    files[`${f}/${n}-statefulset.yaml`] = parts.join("\n");
   }
 
-  // Service
+  if (preset.kind === "Deployment") {
+    const parts = [
+      `apiVersion: apps/v1`,
+      `kind: Deployment`,
+      `metadata:`,
+      `  name: ${n}`,
+      `  namespace: ${namespace}`,
+      `  labels:`,
+      `    app: ${n}`,
+      `    managed-by: endfield`,
+      `spec:`,
+      `  replicas: ${preset.replicas}`,
+      `  selector:`,
+      `    matchLabels:`,
+      `      app: ${n}`,
+      `  strategy:`,
+      `    type: RollingUpdate`,
+      `    rollingUpdate:`,
+      `      maxSurge: 1`,
+      `      maxUnavailable: 0`,
+      `  template:`,
+      `    metadata:`,
+      `      labels:`,
+      `        app: ${n}`,
+      `    spec:`,
+      `      containers:`,
+      `        - name: ${n}`,
+      `          image: ${preset.image}`,
+      `          ports:`,
+      `            - containerPort: ${port}`,
+    ];
+    if (envSection) parts.push(envSection);
+    parts.push(probesSection, resourcesSection, ``);
+    files[`${f}/${n}-deployment.yaml`] = parts.join("\n");
+  }
+
   if (preset.generateService) {
-    const svcType = name === "ingress-nginx" ? "LoadBalancer" : "ClusterIP";
-    files[`${f}/${n}-service.yaml`] =
-      `apiVersion: v1\nkind: Service\nmetadata:\n  name: ${n}\n  namespace: ${namespace}\n  labels:\n    app: ${n}\n    managed-by: endfield\nspec:\n  type: ${svcType}\n  selector:\n    app: ${n}\n  ports:\n    - name: main\n      port: ${port}\n      targetPort: ${port}\n      protocol: TCP\n`;
+    const svcType =
+      presetKey === "ingress-nginx" ? "LoadBalancer" : "ClusterIP";
+    files[`${f}/${n}-service.yaml`] = [
+      `apiVersion: v1`,
+      `kind: Service`,
+      `metadata:`,
+      `  name: ${n}`,
+      `  namespace: ${namespace}`,
+      `  labels:`,
+      `    app: ${n}`,
+      `    managed-by: endfield`,
+      `spec:`,
+      `  type: ${svcType}`,
+      `  selector:`,
+      `    app: ${n}`,
+      `  ports:`,
+      `    - name: main`,
+      `      port: ${port}`,
+      `      targetPort: ${port}`,
+      `      protocol: TCP`,
+      ``,
+    ].join("\n");
   }
 
   return files;
@@ -314,20 +663,6 @@ const MOCK_SCAN_RESULT: ScanResult = {
       namespace: "myapp",
       file_path: "/infra/services/auth-deployment.yaml",
       filePath: "/infra/services/auth-deployment.yaml",
-      replicas: 3,
-      x: 0,
-      y: 0,
-    },
-    {
-      id: "payment-2",
-      label: "payment-svc",
-      kind: "Deployment",
-      image: "myapp/payment:v2.0",
-      type_id: "service",
-      typeId: "service",
-      namespace: "myapp",
-      file_path: "/infra/services/payment-deployment.yaml",
-      filePath: "/infra/services/payment-deployment.yaml",
       replicas: 3,
       x: 0,
       y: 0,
@@ -377,8 +712,6 @@ const MOCK_SCAN_RESULT: ScanResult = {
   ],
 };
 
-// ─── Safe invoke ──────────────────────────────────────────────────────────────
-
 async function safeInvoke<T>(
   cmd: string,
   args?: Record<string, unknown>,
@@ -410,15 +743,6 @@ async function safeInvoke<T>(
             ready: 2,
             available: 2,
             status: "yellow",
-            pods: [],
-          },
-          {
-            label: "payment-svc",
-            namespace: "myapp",
-            desired: 3,
-            ready: 0,
-            available: 0,
-            status: "red",
             pods: [],
           },
           {
@@ -458,8 +782,6 @@ async function safeInvoke<T>(
     throw e;
   }
 }
-
-// ─── Node type presets ────────────────────────────────────────────────────────
 
 const NODE_TYPES: Record<
   string,
@@ -546,12 +868,9 @@ const NODE_TYPES: Record<
     icon: "◇",
   },
 };
-
 function getType(typeId: string) {
   return NODE_TYPES[typeId] || NODE_TYPES.custom;
 }
-
-// ─── Traffic Light ────────────────────────────────────────────────────────────
 
 const STATUS_COLORS = {
   green: {
@@ -616,8 +935,6 @@ function TrafficLight({
   );
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function normalizeNode(node: Partial<YamlNode>): YamlNode {
   return {
     ...node,
@@ -635,7 +952,6 @@ function normalizeNode(node: Partial<YamlNode>): YamlNode {
     file_path: (node as any).file_path || node.filePath || "",
   } as YamlNode;
 }
-
 function autoLayout(nodes: Partial<YamlNode>[]): YamlNode[] {
   const cols = 4,
     xStep = 22,
@@ -649,8 +965,6 @@ function autoLayout(nodes: Partial<YamlNode>[]): YamlNode[] {
   }));
 }
 
-// ─── Project Selector ─────────────────────────────────────────────────────────
-
 function ProjectSelector({
   onProjectLoaded,
 }: {
@@ -659,7 +973,6 @@ function ProjectSelector({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recentPaths = ["~/projects/myapp/infra", "~/work/k8s-configs"];
-
   const load = async (path?: string) => {
     setLoading(true);
     setError(null);
@@ -680,7 +993,6 @@ function ProjectSelector({
       setLoading(false);
     }
   };
-
   return (
     <div
       style={{
@@ -703,20 +1015,6 @@ function ProjectSelector({
           backgroundImage:
             "linear-gradient(rgba(59,130,246,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(59,130,246,0.04) 1px, transparent 1px)",
           backgroundSize: "40px 40px",
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          top: "30%",
-          left: "50%",
-          transform: "translate(-50%,-50%)",
-          width: "40vw",
-          height: "40vw",
-          borderRadius: "50%",
-          background:
-            "radial-gradient(circle, rgba(59,130,246,0.07) 0%, transparent 70%)",
-          pointerEvents: "none",
         }}
       />
       <div
@@ -868,50 +1166,46 @@ function ProjectSelector({
           >
             Recent
           </div>
-          <div
-            style={{ display: "flex", flexDirection: "column", gap: "0.35vw" }}
-          >
-            {recentPaths.map((p) => (
-              <div
-                key={p}
-                onClick={() => load(p)}
+          {recentPaths.map((p) => (
+            <div
+              key={p}
+              onClick={() => load(p)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.6vw",
+                padding: "0.55vw 0.8vw",
+                borderRadius: "0.5vw",
+                border: "1px solid rgba(255,255,255,0.06)",
+                background: "rgba(255,255,255,0.03)",
+                cursor: "pointer",
+                marginBottom: "0.35vw",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "rgba(59,130,246,0.08)";
+                e.currentTarget.style.borderColor = "rgba(96,165,250,0.3)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "rgba(255,255,255,0.03)";
+                e.currentTarget.style.borderColor = "rgba(255,255,255,0.06)";
+              }}
+            >
+              <span
+                style={{ fontSize: "0.8vw", color: "rgba(255,255,255,0.3)" }}
+              >
+                ⊙
+              </span>
+              <span
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.6vw",
-                  padding: "0.55vw 0.8vw",
-                  borderRadius: "0.5vw",
-                  border: "1px solid rgba(255,255,255,0.06)",
-                  background: "rgba(255,255,255,0.03)",
-                  cursor: "pointer",
-                  transition: "all 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(59,130,246,0.08)";
-                  e.currentTarget.style.borderColor = "rgba(96,165,250,0.3)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "rgba(255,255,255,0.03)";
-                  e.currentTarget.style.borderColor = "rgba(255,255,255,0.06)";
+                  fontSize: "0.78vw",
+                  color: "rgba(255,255,255,0.5)",
+                  fontFamily: "monospace",
                 }}
               >
-                <span
-                  style={{ fontSize: "0.8vw", color: "rgba(255,255,255,0.3)" }}
-                >
-                  ⊙
-                </span>
-                <span
-                  style={{
-                    fontSize: "0.78vw",
-                    color: "rgba(255,255,255,0.5)",
-                    fontFamily: "monospace",
-                  }}
-                >
-                  {p}
-                </span>
-              </div>
-            ))}
-          </div>
+                {p}
+              </span>
+            </div>
+          ))}
         </div>
         {error && (
           <div
@@ -932,8 +1226,6 @@ function ProjectSelector({
     </div>
   );
 }
-
-// ─── Scan Toast ───────────────────────────────────────────────────────────────
 
 function ScanToast({
   result,
@@ -984,8 +1276,6 @@ function ScanToast({
   );
 }
 
-// ─── Add Field Modal ──────────────────────────────────────────────────────────
-
 function AddFieldModal({
   onClose,
   onAdd,
@@ -1005,10 +1295,8 @@ function AddFieldModal({
   const [creating, setCreating] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
-
   const preset = FIELD_PRESETS[selectedPreset];
   const t = getType(preset.typeId);
-
   const selectPreset = (key: string) => {
     setSelectedPreset(key);
     const p = FIELD_PRESETS[key];
@@ -1018,7 +1306,6 @@ function AddFieldModal({
     setStep("configure");
     setTimeout(() => nameRef.current?.focus(), 60);
   };
-
   const previewFiles = Object.keys(
     generateConfigs(
       name || selectedPreset,
@@ -1028,17 +1315,14 @@ function AddFieldModal({
       envVars,
     ),
   );
-
   const handleCreate = async () => {
     if (!name.trim() || creating) return;
     setCreating(true);
     setResult(null);
-
     const safeName = name
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
-
     const files = generateConfigs(
       safeName,
       preset,
@@ -1047,46 +1331,37 @@ function AddFieldModal({
       envVars,
     );
     const errors: string[] = [];
-
-    // Сохраняем все файлы последовательно
     for (const [rel, content] of Object.entries(files)) {
-      const fullPath = `${projectPath}/${rel}`;
       try {
         await safeInvoke("save_yaml_file", {
-          filePath: fullPath, // camelCase — Tauri v2 конвертирует в file_path для Rust
+          filePath: `${projectPath}/${rel}`,
           content,
         });
       } catch (e) {
-        errors.push(`Save failed: ${rel}: ${e}`);
+        errors.push(`${rel}: ${e}`);
       }
     }
-
     if (errors.length > 0) {
       setResult(`⚠ Save failed: ${errors[0]}`);
       setCreating(false);
       return;
     }
-
-    // Деплоим: сначала namespace, потом остальное
     try {
-      const nsPath = `${projectPath}/namespace.yaml`;
-      await safeInvoke("kubectl_apply", { path: nsPath });
-
+      await safeInvoke("kubectl_apply", {
+        path: `${projectPath}/namespace.yaml`,
+      });
       for (const rel of Object.keys(files)) {
         if (rel === "namespace.yaml") continue;
-        const fullPath = `${projectPath}/${rel}`;
-        await safeInvoke("kubectl_apply", { path: fullPath });
+        await safeInvoke("kubectl_apply", { path: `${projectPath}/${rel}` });
       }
       setResult("✓ Created & deployed");
     } catch (e) {
       setResult(`⚠ Files saved, kubectl failed: ${String(e).slice(0, 60)}`);
     }
-
     const mainFile =
       Object.keys(files).find(
         (f) => f.includes("statefulset") || f.includes("deployment"),
       ) || Object.keys(files)[0];
-
     onAdd({
       id: `${safeName}-${Date.now()}`,
       label: safeName,
@@ -1101,11 +1376,9 @@ function AddFieldModal({
       x: 30 + Math.random() * 30,
       y: 30 + Math.random() * 30,
     });
-
     setCreating(false);
     setTimeout(onClose, 1500);
   };
-
   return (
     <div
       style={{
@@ -1144,7 +1417,6 @@ function AddFieldModal({
           overflow: "hidden",
         }}
       >
-        {/* Header */}
         <div
           style={{
             padding: "0.9vw 1.3vw",
@@ -1209,8 +1481,6 @@ function AddFieldModal({
             ✕
           </button>
         </div>
-
-        {/* STEP 1 — Pick */}
         {step === "pick" && (
           <div
             style={{
@@ -1312,7 +1582,6 @@ function AddFieldModal({
                         display: "flex",
                         alignItems: "center",
                         gap: "0.4vw",
-                        marginTop: "0.1vw",
                       }}
                     >
                       <span
@@ -1344,8 +1613,6 @@ function AddFieldModal({
             </div>
           </div>
         )}
-
-        {/* STEP 2 — Configure */}
         {step === "configure" && (
           <div
             style={{
@@ -1358,7 +1625,6 @@ function AddFieldModal({
               minHeight: 0,
             }}
           >
-            {/* Preview */}
             <div
               style={{
                 padding: "0.65vw 0.9vw",
@@ -1390,8 +1656,6 @@ function AddFieldModal({
                 </div>
               </div>
             </div>
-
-            {/* Name */}
             <div>
               <label
                 style={{
@@ -1433,8 +1697,6 @@ function AddFieldModal({
                 }
               />
             </div>
-
-            {/* Port */}
             <div>
               <label
                 style={{
@@ -1477,8 +1739,6 @@ function AddFieldModal({
                 }
               />
             </div>
-
-            {/* Env vars */}
             {envVars.length > 0 && (
               <div>
                 <label
@@ -1598,8 +1858,6 @@ function AddFieldModal({
                 </button>
               </div>
             )}
-
-            {/* Files preview */}
             <div>
               <label
                 style={{
@@ -1645,8 +1903,6 @@ function AddFieldModal({
                 ))}
               </div>
             </div>
-
-            {/* Buttons */}
             <div
               style={{
                 display: "flex",
@@ -1708,8 +1964,6 @@ function AddFieldModal({
   );
 }
 
-// ─── Namespace Switcher ───────────────────────────────────────────────────────
-
 function NamespaceSwitcher({
   namespaces,
   active,
@@ -1720,7 +1974,6 @@ function NamespaceSwitcher({
   onChange: (ns: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-
   if (namespaces.length <= 1)
     return (
       <div
@@ -1748,7 +2001,6 @@ function NamespaceSwitcher({
         </span>
       </div>
     );
-
   return (
     <div style={{ position: "relative" }}>
       <div
@@ -1762,7 +2014,6 @@ function NamespaceSwitcher({
           border: `1px solid ${open ? "rgba(96,165,250,0.4)" : "rgba(255,255,255,0.08)"}`,
           background: open ? "rgba(59,130,246,0.08)" : "rgba(255,255,255,0.04)",
           cursor: "pointer",
-          transition: "all 0.12s",
         }}
       >
         <span style={{ color: "rgba(255,255,255,0.2)", fontSize: "0.62vw" }}>
@@ -1777,13 +2028,7 @@ function NamespaceSwitcher({
         >
           {active}
         </span>
-        <span
-          style={{
-            color: "rgba(255,255,255,0.2)",
-            fontSize: "0.55vw",
-            marginLeft: "0.1vw",
-          }}
-        >
+        <span style={{ color: "rgba(255,255,255,0.2)", fontSize: "0.55vw" }}>
           ▾
         </span>
       </div>
@@ -1826,7 +2071,6 @@ function NamespaceSwitcher({
                   gap: "0.45vw",
                   background:
                     ns === active ? "rgba(59,130,246,0.12)" : "transparent",
-                  transition: "background 0.1s",
                 }}
                 onMouseEnter={(e) => {
                   if (ns !== active)
@@ -1862,8 +2106,6 @@ function NamespaceSwitcher({
   );
 }
 
-// ─── Field Configuration Panel ────────────────────────────────────────────────
-
 function FieldConfigPanel({
   node,
   fieldStatus,
@@ -1876,12 +2118,10 @@ function FieldConfigPanel({
   const [replicaValue, setReplicaValue] = useState(1);
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<string | null>(null);
-
   useEffect(() => {
     if (node?.replicas != null) setReplicaValue(node.replicas);
     setApplyResult(null);
   }, [node?.id]);
-
   const handleApply = async () => {
     if (!node) return;
     setApplying(true);
@@ -1896,7 +2136,6 @@ function FieldConfigPanel({
       setTimeout(() => setApplyResult(null), 3000);
     }
   };
-
   if (!node)
     return (
       <div
@@ -1917,13 +2156,10 @@ function FieldConfigPanel({
         </span>
       </div>
     );
-
   const t = getType(node.typeId);
-  const hasReplicas = node.replicas != null;
   const sc = fieldStatus
     ? STATUS_COLORS[fieldStatus.status as keyof typeof STATUS_COLORS]
     : STATUS_COLORS.gray;
-
   return (
     <div
       style={{
@@ -1936,7 +2172,6 @@ function FieldConfigPanel({
         paddingRight: "0.3vw",
       }}
     >
-      {/* Header */}
       <div
         style={{
           display: "flex",
@@ -1970,8 +2205,6 @@ function FieldConfigPanel({
         </div>
         {fieldStatus && <TrafficLight status={fieldStatus.status} size={9} />}
       </div>
-
-      {/* Live stats */}
       {fieldStatus && (
         <div
           style={{
@@ -2016,9 +2249,7 @@ function FieldConfigPanel({
           ))}
         </div>
       )}
-
-      {/* Replicas */}
-      {hasReplicas && (
+      {node.replicas != null && (
         <div
           style={{
             background: "rgba(255,255,255,0.03)",
@@ -2119,8 +2350,6 @@ function FieldConfigPanel({
           </div>
         </div>
       )}
-
-      {/* Image */}
       {node.image && (
         <div
           style={{
@@ -2156,8 +2385,6 @@ function FieldConfigPanel({
           </div>
         </div>
       )}
-
-      {/* File */}
       {(node.filePath || node.file_path) && (
         <div
           style={{
@@ -2193,8 +2420,6 @@ function FieldConfigPanel({
           </div>
         </div>
       )}
-
-      {/* Pods */}
       {fieldStatus && fieldStatus.pods.length > 0 && (
         <div
           style={{
@@ -2264,9 +2489,7 @@ function FieldConfigPanel({
           ))}
         </div>
       )}
-
-      {/* Apply */}
-      {hasReplicas && (
+      {node.replicas != null && (
         <button
           onClick={handleApply}
           disabled={applying}
@@ -2286,7 +2509,6 @@ function FieldConfigPanel({
             fontSize: "0.82vw",
             padding: "0.65vw 0",
             cursor: applying ? "not-allowed" : "pointer",
-            boxShadow: "0 0 12px rgba(59,130,246,0.15)",
             fontFamily: "monospace",
             fontWeight: 600,
             transition: "all 0.15s",
@@ -2300,7 +2522,384 @@ function FieldConfigPanel({
   );
 }
 
-// ─── Context Menu ─────────────────────────────────────────────────────────────
+// ─── deriveRelatedFiles — по пути statefulset/deployment находим все связанные файлы ────
+
+function deriveRelatedFiles(mainFilePath: string): string[] {
+  if (!mainFilePath) return [];
+  const files: string[] = [mainFilePath];
+  const dir = mainFilePath.substring(0, mainFilePath.lastIndexOf("/"));
+  const filename = mainFilePath.substring(mainFilePath.lastIndexOf("/") + 1);
+  // имя без суффикса (-statefulset.yaml, -deployment.yaml, etc.)
+  const base = filename
+    .replace(/-statefulset\.ya?ml$/, "")
+    .replace(/-deployment\.ya?ml$/, "")
+    .replace(/\.ya?ml$/, "");
+
+  const siblings = [
+    `${dir}/${base}-secret.yaml`,
+    `${dir}/${base}-configmap.yaml`,
+    `${dir}/${base}-service.yaml`,
+    `${dir}/${base}-headless-svc.yaml`,
+  ];
+  for (const s of siblings) {
+    if (s !== mainFilePath) files.push(s);
+  }
+  return files;
+}
+
+// ─── DeleteConfirmModal ───────────────────────────────────────────────────────
+
+function DeleteConfirmModal({
+  node,
+  onClose,
+  onConfirm,
+}: {
+  node: YamlNode;
+  onClose: () => void;
+  onConfirm: (
+    node: YamlNode,
+    mode: "full" | "cluster_only" | "ui_only",
+  ) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"full" | "cluster_only" | "ui_only">("full");
+  const [deleting, setDeleting] = useState(false);
+  const t = (() => {
+    const types: Record<
+      string,
+      { border: string; accent: string; bg: string }
+    > = {
+      database: {
+        border: "rgba(59,130,246,0.5)",
+        accent: "#2563eb",
+        bg: "rgba(10,31,61,0.95)",
+      },
+      cache: {
+        border: "rgba(251,146,60,0.5)",
+        accent: "#ea580c",
+        bg: "rgba(45,16,0,0.95)",
+      },
+      queue: {
+        border: "rgba(239,68,68,0.5)",
+        accent: "#dc2626",
+        bg: "rgba(45,0,0,0.95)",
+      },
+      gateway: {
+        border: "rgba(96,165,250,0.5)",
+        accent: "#3b82f6",
+        bg: "rgba(15,40,71,0.95)",
+      },
+      monitoring: {
+        border: "rgba(167,139,250,0.5)",
+        accent: "#7c3aed",
+        bg: "rgba(18,0,61,0.95)",
+      },
+    };
+    return (
+      types[(node as any).typeId || (node as any).type_id || "service"] || {
+        border: "rgba(100,116,139,0.4)",
+        accent: "#475569",
+        bg: "rgba(13,20,36,0.95)",
+      }
+    );
+  })();
+
+  const filePath = (node as any).filePath || node.file_path;
+  const relFiles = deriveRelatedFiles(filePath);
+
+  const handleConfirm = async () => {
+    setDeleting(true);
+    try {
+      await onConfirm(node, mode);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const modeLabels = {
+    full: {
+      title: "Delete everything",
+      desc: "Remove YAML files from disk + kubectl delete from cluster",
+      icon: "⚠",
+      color: "#f87171",
+    },
+    cluster_only: {
+      title: "Cluster only",
+      desc: "kubectl delete from cluster, keep YAML files on disk",
+      icon: "☁",
+      color: "#fbbf24",
+    },
+    ui_only: {
+      title: "UI only",
+      desc: "Remove from this view only, don't touch files or cluster",
+      icon: "◈",
+      color: "#94a3b8",
+    },
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "rgba(4,8,18,0.8)",
+          backdropFilter: "blur(12px)",
+        }}
+      />
+      <div
+        style={{
+          position: "relative",
+          width: "32vw",
+          minWidth: 380,
+          borderRadius: "1vw",
+          background: t.bg,
+          border: `1px solid ${t.border}`,
+          boxShadow: `0 0 40px rgba(239,68,68,0.15), 0 24px 60px rgba(0,0,0,0.7)`,
+          fontFamily: "monospace",
+          animation: "modalIn 0.2s cubic-bezier(0.34,1.45,0.64,1) both",
+          overflow: "hidden",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: "0.8vw 1.2vw",
+            borderBottom: "1px solid rgba(239,68,68,0.15)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5vw" }}>
+            <span style={{ color: "#f87171", fontSize: "1.1vw" }}>⌫</span>
+            <span
+              style={{ color: "white", fontWeight: 700, fontSize: "0.9vw" }}
+            >
+              Delete Field
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "none",
+              border: "none",
+              color: "rgba(255,255,255,0.3)",
+              cursor: "pointer",
+              fontSize: "0.9vw",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div
+          style={{
+            padding: "1vw 1.2vw",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.8vw",
+          }}
+        >
+          {/* Node info */}
+          <div
+            style={{
+              padding: "0.6vw 0.9vw",
+              background: "rgba(255,255,255,0.04)",
+              border: `1px solid ${t.border}`,
+              borderRadius: "0.5vw",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.6vw",
+            }}
+          >
+            <div style={{ flex: 1 }}>
+              <div
+                style={{ color: "white", fontWeight: 600, fontSize: "0.88vw" }}
+              >
+                {node.label}
+              </div>
+              <div
+                style={{
+                  color: "rgba(255,255,255,0.3)",
+                  fontSize: "0.65vw",
+                  marginTop: "0.1vw",
+                }}
+              >
+                {node.kind} · ns: {node.namespace}
+              </div>
+            </div>
+            <span
+              style={{
+                color: t.accent,
+                fontSize: "0.65vw",
+                padding: "0.15vw 0.5vw",
+                border: `1px solid ${t.accent}44`,
+                borderRadius: "0.25vw",
+                background: `${t.accent}18`,
+              }}
+            >
+              {(node as any).typeId || node.type_id}
+            </span>
+          </div>
+
+          {/* Mode selector */}
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: "0.35vw" }}
+          >
+            {(["full", "cluster_only", "ui_only"] as const).map((m) => {
+              const ml = modeLabels[m];
+              const active = mode === m;
+              return (
+                <div
+                  key={m}
+                  onClick={() => setMode(m)}
+                  style={{
+                    padding: "0.55vw 0.8vw",
+                    borderRadius: "0.5vw",
+                    border: `1px solid ${active ? ml.color + "66" : "rgba(255,255,255,0.07)"}`,
+                    background: active
+                      ? `${ml.color}12`
+                      : "rgba(255,255,255,0.02)",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.6vw",
+                    transition: "all 0.1s",
+                  }}
+                >
+                  <span
+                    style={{
+                      color: active ? ml.color : "rgba(255,255,255,0.25)",
+                      fontSize: "0.9vw",
+                      width: "1.1vw",
+                      textAlign: "center",
+                    }}
+                  >
+                    {active ? "◉" : "○"}
+                  </span>
+                  <div>
+                    <div
+                      style={{
+                        color: active ? ml.color : "rgba(255,255,255,0.7)",
+                        fontSize: "0.78vw",
+                        fontWeight: active ? 600 : 400,
+                      }}
+                    >
+                      {ml.icon} {ml.title}
+                    </div>
+                    <div
+                      style={{
+                        color: "rgba(255,255,255,0.25)",
+                        fontSize: "0.63vw",
+                        marginTop: "0.1vw",
+                      }}
+                    >
+                      {ml.desc}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Files list (only for full mode) */}
+          {mode === "full" && filePath && (
+            <div
+              style={{
+                padding: "0.5vw 0.7vw",
+                background: "rgba(239,68,68,0.06)",
+                border: "1px solid rgba(239,68,68,0.15)",
+                borderRadius: "0.4vw",
+              }}
+            >
+              <div
+                style={{
+                  color: "rgba(239,68,68,0.6)",
+                  fontSize: "0.6vw",
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  marginBottom: "0.3vw",
+                }}
+              >
+                Will delete from disk
+              </div>
+              {relFiles.map((f) => (
+                <div
+                  key={f}
+                  style={{
+                    color: "rgba(255,255,255,0.35)",
+                    fontSize: "0.63vw",
+                    fontFamily: "monospace",
+                    lineHeight: 1.7,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  ✕ {f.split("/").slice(-3).join("/")}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Buttons */}
+          <div style={{ display: "flex", gap: "0.5vw", marginTop: "0.2vw" }}>
+            <button
+              onClick={onClose}
+              style={{
+                flex: 1,
+                background: "rgba(255,255,255,0.05)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: "0.45vw",
+                color: "rgba(255,255,255,0.4)",
+                fontSize: "0.78vw",
+                padding: "0.6vw 0",
+                cursor: "pointer",
+                fontFamily: "monospace",
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirm}
+              disabled={deleting}
+              style={{
+                flex: 2,
+                background: deleting
+                  ? "rgba(239,68,68,0.2)"
+                  : "linear-gradient(135deg, rgba(220,38,38,0.7), rgba(185,28,28,0.9))",
+                border: "1px solid rgba(239,68,68,0.5)",
+                borderRadius: "0.45vw",
+                color: "#fca5a5",
+                fontSize: "0.78vw",
+                fontWeight: 700,
+                padding: "0.6vw 0",
+                cursor: deleting ? "not-allowed" : "pointer",
+                fontFamily: "monospace",
+                transition: "all 0.15s",
+                boxShadow: "0 0 16px rgba(239,68,68,0.2)",
+              }}
+            >
+              {deleting ? "Deleting..." : `Confirm Delete`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ContextMenu({
   menu,
@@ -2323,7 +2922,6 @@ function ContextMenu({
     if (renaming) inputRef.current?.focus();
   }, [renaming]);
   if (!menu.visible) return null;
-
   const items = [
     {
       id: "rename",
@@ -2354,7 +2952,6 @@ function ContextMenu({
       },
     },
   ];
-
   return (
     <>
       <div
@@ -2470,7 +3067,6 @@ function ContextMenu({
                       ? "rgba(239,68,68,0.18)"
                       : "rgba(255,255,255,0.09)"
                     : "transparent",
-                transition: "background 0.1s",
               }}
             >
               <span
@@ -2504,8 +3100,6 @@ function ContextMenu({
   );
 }
 
-// ─── YAML Modal ───────────────────────────────────────────────────────────────
-
 function YamlModal({ node, onClose }: { node: YamlNode; onClose: () => void }) {
   const [content, setContent] = useState("Loading...");
   useEffect(() => {
@@ -2518,7 +3112,6 @@ function YamlModal({ node, onClose }: { node: YamlNode; onClose: () => void }) {
       .then(setContent)
       .catch((e) => setContent(`Error: ${e}`));
   }, [node.filePath]);
-
   return (
     <div
       style={{
@@ -2622,8 +3215,6 @@ function YamlModal({ node, onClose }: { node: YamlNode; onClose: () => void }) {
   );
 }
 
-// ─── Draggable Node ───────────────────────────────────────────────────────────
-
 function DraggableNode({
   node,
   fieldStatus,
@@ -2704,8 +3295,6 @@ function DraggableNode({
   );
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
-
 export default function App() {
   const [screen, setScreen] = useState<"selector" | "dashboard">("selector");
   const [project, setProject] = useState<ScanResult | null>(null);
@@ -2728,6 +3317,9 @@ export default function App() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [yamlModal, setYamlModal] = useState<YamlNode | null>(null);
   const [scanToast, setScanToast] = useState<ScanResult | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ node: YamlNode } | null>(
+    null,
+  );
   const dragState = useRef<{
     id: string;
     offsetXpct: number;
@@ -2778,10 +3370,10 @@ export default function App() {
     setNodes(autoLayout(result.nodes));
     setProject(result);
     setScanToast(result);
-    const projectName = result.project_path.split("/").pop() || "default";
     const found = Array.from(
       new Set(result.nodes.map((n) => n.namespace).filter(Boolean)),
     );
+    const projectName = result.project_path.split("/").pop() || "default";
     setActiveNamespace(
       found.find((ns) => ns === projectName) || found[0] || projectName,
     );
@@ -2805,16 +3397,28 @@ export default function App() {
     if (!dragState.current || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     const { id, offsetXpct, offsetYpct } = dragState.current;
-    const newX = Math.max(
-      0,
-      Math.min(((e.clientX - rect.left) / rect.width) * 100 - offsetXpct, 88),
-    );
-    const newY = Math.max(
-      0,
-      Math.min(((e.clientY - rect.top) / rect.height) * 100 - offsetYpct, 90),
-    );
     setNodes((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, x: newX, y: newY } : n)),
+      prev.map((n) =>
+        n.id === id
+          ? {
+              ...n,
+              x: Math.max(
+                0,
+                Math.min(
+                  ((e.clientX - rect.left) / rect.width) * 100 - offsetXpct,
+                  88,
+                ),
+              ),
+              y: Math.max(
+                0,
+                Math.min(
+                  ((e.clientY - rect.top) / rect.height) * 100 - offsetYpct,
+                  90,
+                ),
+              ),
+            }
+          : n,
+      ),
     );
   }, []);
 
@@ -2838,8 +3442,11 @@ export default function App() {
     [],
   );
   const handleDelete = useCallback(
-    (id: string) => setNodes((prev) => prev.filter((n) => n.id !== id)),
-    [],
+    (id: string) => {
+      const node = nodes.find((n) => n.id === id);
+      if (node) setDeleteConfirm({ node });
+    },
+    [nodes],
   );
   const handleRename = useCallback(
     (id: string, label: string) =>
@@ -2860,7 +3467,6 @@ export default function App() {
   const handleNodeClick = useCallback((node: YamlNode) => {
     setSelectedNode((prev) => (prev?.id === node.id ? null : node));
   }, []);
-
   const handleApplyReplicas = useCallback(
     async (node: YamlNode, replicas: number) => {
       const filePath = node.filePath || node.file_path;
@@ -2920,7 +3526,6 @@ export default function App() {
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
     >
-      {/* HEADER */}
       <div
         style={{
           position: "relative",
@@ -3118,7 +3723,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* GRID */}
       <div
         style={{
           flex: 1,
@@ -3129,7 +3733,6 @@ export default function App() {
           minHeight: 0,
         }}
       >
-        {/* CANVAS */}
         <div
           style={{
             gridColumn: "1",
@@ -3256,7 +3859,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* FIELD CONFIG */}
         <div
           style={{
             gridColumn: "2",
@@ -3313,7 +3915,6 @@ export default function App() {
           />
         </div>
 
-        {/* AI ASSISTANT */}
         <div
           style={{
             gridColumn: "2",
@@ -3495,6 +4096,31 @@ export default function App() {
       )}
       {scanToast && (
         <ScanToast result={scanToast} onDismiss={() => setScanToast(null)} />
+      )}
+      {deleteConfirm && (
+        <DeleteConfirmModal
+          node={deleteConfirm.node}
+          onClose={() => setDeleteConfirm(null)}
+          onConfirm={async (node, mode) => {
+            setDeleteConfirm(null);
+            const filePath = node.filePath || node.file_path;
+            const allFiles = deriveRelatedFiles(filePath);
+            if (mode === "full") {
+              await safeInvoke("delete_field_files", {
+                filePaths: allFiles,
+                namespace: node.namespace,
+              });
+            } else if (mode === "cluster_only") {
+              await safeInvoke("kubectl_delete_by_label", {
+                label: node.label,
+                namespace: node.namespace,
+              });
+            }
+            setNodes((prev) => prev.filter((n) => n.id !== node.id));
+            if (selectedNode?.id === node.id) setSelectedNode(null);
+            setTimeout(fetchClusterStatus, 1000);
+          }}
+        />
       )}
 
       <style>{`
