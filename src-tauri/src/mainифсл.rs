@@ -642,51 +642,6 @@ fn patch_replicas_in_file(
         .map_err(|e| format!("Cannot write {}: {}", file_path, e))
 }
 
-// ─── .endfield layout ────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FieldLayoutEntry {
-    pub id: String,
-    pub x: f64,
-    pub y: f64,
-    pub label: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EndfieldLayout {
-    pub version: u32,
-    pub project_path: String,
-    pub fields: Vec<FieldLayoutEntry>,
-}
-
-#[tauri::command]
-fn save_endfield_layout(
-    project_path: String,
-    fields: Vec<FieldLayoutEntry>,
-) -> Result<(), String> {
-    let layout = EndfieldLayout {
-        version: 1,
-        project_path: project_path.clone(),
-        fields,
-    };
-    let json = serde_json::to_string_pretty(&layout)
-        .map_err(|e| format!("Serialize error: {}", e))?;
-    let out_path = Path::new(&project_path).join(".endfield");
-    fs::write(&out_path, json)
-        .map_err(|e| format!("Cannot write .endfield: {}", e))
-}
-
-#[tauri::command]
-fn load_endfield_layout(project_path: String) -> Result<EndfieldLayout, String> {
-    let in_path = Path::new(&project_path).join(".endfield");
-    if !in_path.exists() {
-        return Err("No .endfield file found".to_string());
-    }
-    let content = fs::read_to_string(&in_path)
-        .map_err(|e| format!("Cannot read .endfield: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))
-}
-
 // ─── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1269,8 +1224,6 @@ fn main() {
             helm_template_async,
             helm_install_async,
             kubectl_apply_async,
-            save_endfield_layout,
-            load_endfield_layout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
