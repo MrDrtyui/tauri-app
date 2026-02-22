@@ -1,6 +1,18 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface HelmNodeMeta {
+  release_name: string;
+  namespace: string;
+  chart_name: string;
+  chart_version: string;
+  repo: string;
+  values_path: string;
+  rendered_dir: string;
+}
+
 interface YamlNode {
   id: string;
   label: string;
@@ -14,7 +26,10 @@ interface YamlNode {
   replicas: number | null;
   x: number;
   y: number;
+  source: "raw" | "helm" | "external";
+  helm?: HelmNodeMeta;
 }
+
 interface PodInfo {
   name: string;
   namespace: string;
@@ -23,6 +38,7 @@ interface PodInfo {
   total: number;
   restarts: number;
 }
+
 interface FieldStatus {
   label: string;
   namespace: string;
@@ -32,16 +48,19 @@ interface FieldStatus {
   status: "green" | "yellow" | "red" | "gray";
   pods: PodInfo[];
 }
+
 interface ClusterStatus {
   fields: FieldStatus[];
   kubectl_available: boolean;
   error: string | null;
 }
+
 interface ScanResult {
   nodes: YamlNode[];
   project_path: string;
   errors: string[];
 }
+
 interface ContextMenuState {
   visible: boolean;
   x: number;
@@ -51,10 +70,12 @@ interface ContextMenuState {
   kind: string;
   namespace: string;
 }
+
 interface FieldEnvVar {
   key: string;
   value: string;
 }
+
 interface FieldPreset {
   typeId: string;
   image: string;
@@ -68,6 +89,25 @@ interface FieldPreset {
   storageSize?: string;
   envVars: FieldEnvVar[];
 }
+
+interface HelmPreset {
+  typeId: string;
+  description: string;
+  chartName: string;
+  repo: string;
+  version: string;
+  defaultNamespace: string;
+  defaultValues: string;
+  prodValues: string;
+}
+
+interface HelmRenderResult {
+  rendered_files: string[];
+  warnings: string[];
+  error: string | null;
+}
+
+// ─── Raw YAML Presets ─────────────────────────────────────────────────────────
 
 const FIELD_PRESETS: Record<string, FieldPreset> = {
   postgres: {
@@ -163,17 +203,6 @@ const FIELD_PRESETS: Record<string, FieldPreset> = {
     generateService: true,
     envVars: [],
   },
-  "ingress-nginx": {
-    typeId: "gateway",
-    image: "registry.k8s.io/ingress-nginx/controller:v1.9.6",
-    defaultPort: 80,
-    kind: "Deployment",
-    replicas: 1,
-    description: "Nginx Ingress Controller",
-    folder: "ingress",
-    generateService: true,
-    envVars: [],
-  },
   grafana: {
     typeId: "monitoring",
     image: "grafana/grafana:10.3.1",
@@ -218,17 +247,303 @@ const FIELD_PRESETS: Record<string, FieldPreset> = {
   },
 };
 
-// ─── YAML Config Generator — production-grade ─────────────────────────────────
-// Rules:
-//  • StatefulSet: headless Service (clusterIP: None) + ClusterIP Service
-//  • Passwords → Secret, rest → ConfigMap
-//  • livenessProbe + readinessProbe per service type
-//  • Realistic resource requests/limits
-//  • PGDATA with subPath for postgres (required)
-//  • MongoDB: /data/db mountPath
-//  • Kafka: replicas 3, replication factor 3
-//  • Prometheus: /-/healthy /-/ready
-//  • Grafana: /api/health
+// ─── Helm Presets ─────────────────────────────────────────────────────────────
+
+const HELM_PRESETS: Record<string, HelmPreset> = {
+  "ingress-nginx": {
+    typeId: "gateway",
+    description: "Nginx Ingress Controller (official chart)",
+    chartName: "ingress-nginx",
+    repo: "https://kubernetes.github.io/ingress-nginx",
+    version: "4.10.1",
+    defaultNamespace: "infra-ingress-nginx",
+    defaultValues: `ingress-nginx:
+  namespaceOverride: "infra-ingress-nginx"
+
+  controller:
+    replicaCount: 1
+
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+    service:
+      type: LoadBalancer
+      annotations: {}
+
+    ingressClassResource:
+      name: nginx
+      enabled: true
+      default: false
+
+    admissionWebhooks:
+      enabled: false
+
+  rbac:
+    create: true
+`,
+    prodValues: `# Production overrides — edit this file for prod deployments
+ingress-nginx:
+  controller:
+    replicaCount: 2
+
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+
+    service:
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+
+    admissionWebhooks:
+      enabled: true
+`,
+  },
+  redis: {
+    typeId: "cache",
+    description: "Redis (Bitnami chart)",
+    chartName: "redis",
+    repo: "https://charts.bitnami.com/bitnami",
+    version: "19.5.5",
+    defaultNamespace: "infra-redis",
+    defaultValues: `redis:
+  namespaceOverride: "infra-redis"
+
+  architecture: standalone
+
+  auth:
+    enabled: false
+    # Set to true and provide password for production
+    # password: ""
+
+  master:
+    persistence:
+      enabled: true
+      size: 2Gi
+
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+  replica:
+    replicaCount: 0
+`,
+    prodValues: `# Production overrides — edit this file for prod deployments
+redis:
+  architecture: replication
+
+  auth:
+    enabled: true
+    password: "CHANGE_ME"
+
+  master:
+    persistence:
+      size: 10Gi
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "2Gi"
+
+  replica:
+    replicaCount: 2
+    persistence:
+      size: 10Gi
+`,
+  },
+  "cert-manager": {
+    typeId: "infra",
+    description: "cert-manager (Jetstack chart)",
+    chartName: "cert-manager",
+    repo: "https://charts.jetstack.io",
+    version: "1.14.5",
+    defaultNamespace: "infra-cert-manager",
+    defaultValues: `cert-manager:
+  namespaceOverride: "infra-cert-manager"
+
+  installCRDs: true
+
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+`,
+    prodValues: `# Production overrides — edit this file for prod deployments
+cert-manager:
+  replicaCount: 2
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+`,
+  },
+  prometheus: {
+    typeId: "monitoring",
+    description: "kube-prometheus-stack (Prometheus + Grafana)",
+    chartName: "kube-prometheus-stack",
+    repo: "https://prometheus-community.github.io/helm-charts",
+    version: "58.2.2",
+    defaultNamespace: "infra-monitoring",
+    defaultValues: `kube-prometheus-stack:
+  namespaceOverride: "infra-monitoring"
+
+  grafana:
+    enabled: true
+    adminPassword: "admin"
+    persistence:
+      enabled: true
+      size: 5Gi
+
+  prometheus:
+    prometheusSpec:
+      retention: 15d
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 10Gi
+
+  alertmanager:
+    enabled: false
+`,
+    prodValues: `# Production overrides — edit this file for prod deployments
+kube-prometheus-stack:
+  grafana:
+    adminPassword: "CHANGE_ME"
+    persistence:
+      size: 20Gi
+
+  prometheus:
+    prometheusSpec:
+      retention: 30d
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            resources:
+              requests:
+                storage: 50Gi
+
+  alertmanager:
+    enabled: true
+`,
+  },
+  kafka: {
+    typeId: "queue",
+    description: "Apache Kafka (Bitnami chart)",
+    chartName: "kafka",
+    repo: "https://charts.bitnami.com/bitnami",
+    version: "28.3.0",
+    defaultNamespace: "infra-kafka",
+    defaultValues: `kafka:
+  namespaceOverride: "infra-kafka"
+
+  replicaCount: 1
+
+  persistence:
+    enabled: true
+    size: 20Gi
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+
+  zookeeper:
+    enabled: false
+
+  kraft:
+    enabled: true
+`,
+    prodValues: `# Production overrides — edit this file for prod deployments
+kafka:
+  replicaCount: 3
+
+  persistence:
+    size: 50Gi
+
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "2Gi"
+    limits:
+      cpu: "4000m"
+      memory: "8Gi"
+`,
+  },
+};
+
+// ─── Helm file generators ─────────────────────────────────────────────────────
+
+function generateHelmConfigs(
+  releaseName: string,
+  preset: HelmPreset,
+): Record<string, string> {
+  const files: Record<string, string> = {};
+  const ns = preset.defaultNamespace;
+  const base = `infra/${releaseName}`;
+
+  files[`${base}/namespace.yaml`] = [
+    `apiVersion: v1`,
+    `kind: Namespace`,
+    `metadata:`,
+    `  name: ${ns}`,
+    `  labels:`,
+    `    managed-by: endfield`,
+    `    endfield-component: ${releaseName}`,
+    ``,
+  ].join("\n");
+
+  files[`${base}/helm/Chart.yaml`] = [
+    `apiVersion: v2`,
+    `name: ${releaseName}`,
+    `description: Endfield-managed wrapper chart for ${releaseName}`,
+    `type: application`,
+    `version: 0.1.0`,
+    `appVersion: ""`,
+    ``,
+    `dependencies:`,
+    `  - name: ${preset.chartName}`,
+    `    version: "${preset.version}"`,
+    `    repository: "${preset.repo}"`,
+    ``,
+  ].join("\n");
+
+  files[`${base}/helm/values.yaml`] = preset.defaultValues;
+  files[`${base}/helm/values.prod.yaml`] = preset.prodValues;
+  files[`${base}/rendered/.gitkeep`] = "";
+
+  return files;
+}
+
+// ─── Raw YAML generator ───────────────────────────────────────────────────────
 
 function generateConfigs(
   name: string,
@@ -641,17 +956,27 @@ const MOCK_SCAN_RESULT: ScanResult = {
   nodes: [
     {
       id: "nginx-0",
-      label: "nginx",
-      kind: "Deployment",
-      image: "nginx:latest",
+      label: "ingress-nginx",
+      kind: "HelmRelease",
+      image: "helm:ingress-nginx/4.10.1",
       type_id: "gateway",
       typeId: "gateway",
-      namespace: "myapp",
-      file_path: "/infra/ingress/nginx-deployment.yaml",
-      filePath: "/infra/ingress/nginx-deployment.yaml",
-      replicas: 2,
+      namespace: "infra-ingress-nginx",
+      file_path: "/infra/infra/ingress-nginx/helm/Chart.yaml",
+      filePath: "/infra/infra/ingress-nginx/helm/Chart.yaml",
+      replicas: null,
       x: 0,
       y: 0,
+      source: "helm",
+      helm: {
+        release_name: "ingress-nginx",
+        namespace: "infra-ingress-nginx",
+        chart_name: "ingress-nginx",
+        chart_version: "4.10.1",
+        repo: "https://kubernetes.github.io/ingress-nginx",
+        values_path: "/infra/infra/ingress-nginx/helm/values.yaml",
+        rendered_dir: "/infra/infra/ingress-nginx/rendered",
+      },
     },
     {
       id: "auth-1",
@@ -661,28 +986,39 @@ const MOCK_SCAN_RESULT: ScanResult = {
       type_id: "service",
       typeId: "service",
       namespace: "myapp",
-      file_path: "/infra/services/auth-deployment.yaml",
-      filePath: "/infra/services/auth-deployment.yaml",
+      file_path: "/infra/apps/auth-deployment.yaml",
+      filePath: "/infra/apps/auth-deployment.yaml",
       replicas: 3,
       x: 0,
       y: 0,
+      source: "raw",
     },
     {
-      id: "redis-3",
-      label: "redis-cache",
-      kind: "StatefulSet",
-      image: "redis:7-alpine",
+      id: "redis-2",
+      label: "redis",
+      kind: "HelmRelease",
+      image: "helm:redis/19.5.5",
       type_id: "cache",
       typeId: "cache",
-      namespace: "myapp",
-      file_path: "/infra/cache/redis-statefulset.yaml",
-      filePath: "/infra/cache/redis-statefulset.yaml",
-      replicas: 1,
+      namespace: "infra-redis",
+      file_path: "/infra/infra/redis/helm/Chart.yaml",
+      filePath: "/infra/infra/redis/helm/Chart.yaml",
+      replicas: null,
       x: 0,
       y: 0,
+      source: "helm",
+      helm: {
+        release_name: "redis",
+        namespace: "infra-redis",
+        chart_name: "redis",
+        chart_version: "19.5.5",
+        repo: "https://charts.bitnami.com/bitnami",
+        values_path: "/infra/infra/redis/helm/values.yaml",
+        rendered_dir: "/infra/infra/redis/rendered",
+      },
     },
     {
-      id: "kafka-4",
+      id: "kafka-3",
       label: "kafka-broker",
       kind: "StatefulSet",
       image: "confluentinc/cp-kafka:7.4",
@@ -694,9 +1030,10 @@ const MOCK_SCAN_RESULT: ScanResult = {
       replicas: 3,
       x: 0,
       y: 0,
+      source: "raw",
     },
     {
-      id: "postgres-5",
+      id: "postgres-4",
       label: "postgres-db",
       kind: "StatefulSet",
       image: "postgres:15",
@@ -708,6 +1045,7 @@ const MOCK_SCAN_RESULT: ScanResult = {
       replicas: 1,
       x: 0,
       y: 0,
+      source: "raw",
     },
   ],
 };
@@ -728,11 +1066,11 @@ async function safeInvoke<T>(
       return {
         fields: [
           {
-            label: "nginx",
-            namespace: "myapp",
-            desired: 2,
-            ready: 2,
-            available: 2,
+            label: "ingress-nginx",
+            namespace: "infra-ingress-nginx",
+            desired: 1,
+            ready: 1,
+            available: 1,
             status: "green",
             pods: [],
           },
@@ -746,8 +1084,8 @@ async function safeInvoke<T>(
             pods: [],
           },
           {
-            label: "redis-cache",
-            namespace: "myapp",
+            label: "redis",
+            namespace: "infra-redis",
             desired: 1,
             ready: 1,
             available: 1,
@@ -779,9 +1117,23 @@ async function safeInvoke<T>(
     if (cmd === "apply_replicas") return "✓ Applied (mock)" as T;
     if (cmd === "save_yaml_file") return undefined as T;
     if (cmd === "kubectl_apply") return "✓ Applied (mock)" as T;
+    if (cmd === "helm_template")
+      return {
+        rendered_files: [
+          "rendered/00-namespace.yaml",
+          "rendered/01-deployment.yaml",
+        ],
+        warnings: [],
+        error: null,
+      } as T;
+    if (cmd === "helm_install")
+      return "✓ helm upgrade --install succeeded (mock)" as T;
+    if (cmd === "helm_available") return true as T;
     throw e;
   }
 }
+
+// ─── Node types ───────────────────────────────────────────────────────────────
 
 const NODE_TYPES: Record<
   string,
@@ -858,6 +1210,15 @@ const NODE_TYPES: Record<
     accent: "#ca8a04",
     icon: "≡",
   },
+  infra: {
+    label: "Infra",
+    bg: "linear-gradient(135deg, #0d1f0d 0%, #1a3a1a 100%)",
+    border: "rgba(74,222,128,0.55)",
+    color: "#bbf7d0",
+    shadow: "rgba(34,197,94,0.35)",
+    accent: "#16a34a",
+    icon: "⛵",
+  },
   custom: {
     label: "Custom",
     bg: "linear-gradient(135deg, #0f1117 0%, #1a1d27 100%)",
@@ -868,6 +1229,7 @@ const NODE_TYPES: Record<
     icon: "◇",
   },
 };
+
 function getType(typeId: string) {
   return NODE_TYPES[typeId] || NODE_TYPES.custom;
 }
@@ -890,6 +1252,8 @@ const STATUS_COLORS = {
   },
   gray: { outer: "rgba(100,116,139,0.2)", inner: "#475569", glow: "none" },
 };
+
+// ─── Components ───────────────────────────────────────────────────────────────
 
 function TrafficLight({
   status,
@@ -950,8 +1314,11 @@ function normalizeNode(node: Partial<YamlNode>): YamlNode {
     type_id: (node as any).type_id || node.typeId || "service",
     filePath: node.filePath || (node as any).file_path || "",
     file_path: (node as any).file_path || node.filePath || "",
+    source: node.source || "raw",
+    helm: node.helm,
   } as YamlNode;
 }
+
 function autoLayout(nodes: Partial<YamlNode>[]): YamlNode[] {
   const cols = 4,
     xStep = 22,
@@ -964,6 +1331,29 @@ function autoLayout(nodes: Partial<YamlNode>[]): YamlNode[] {
     y: yStart + Math.floor(i / cols) * yStep,
   }));
 }
+
+function deriveRelatedFiles(mainFilePath: string): string[] {
+  if (!mainFilePath) return [];
+  const files: string[] = [mainFilePath];
+  const dir = mainFilePath.substring(0, mainFilePath.lastIndexOf("/"));
+  const filename = mainFilePath.substring(mainFilePath.lastIndexOf("/") + 1);
+  const base = filename
+    .replace(/-statefulset\.ya?ml$/, "")
+    .replace(/-deployment\.ya?ml$/, "")
+    .replace(/\.ya?ml$/, "");
+  const siblings = [
+    `${dir}/${base}-secret.yaml`,
+    `${dir}/${base}-configmap.yaml`,
+    `${dir}/${base}-service.yaml`,
+    `${dir}/${base}-headless-svc.yaml`,
+  ];
+  for (const s of siblings) {
+    if (s !== mainFilePath) files.push(s);
+  }
+  return files;
+}
+
+// ─── ProjectSelector ──────────────────────────────────────────────────────────
 
 function ProjectSelector({
   onProjectLoaded,
@@ -1276,6 +1666,8 @@ function ScanToast({
   );
 }
 
+// ─── AddFieldModal ────────────────────────────────────────────────────────────
+
 function AddFieldModal({
   onClose,
   onAdd,
@@ -1287,16 +1679,28 @@ function AddFieldModal({
   projectNamespace: string;
   projectPath: string;
 }) {
+  const [tab, setTab] = useState<"raw" | "helm">("raw");
   const [step, setStep] = useState<"pick" | "configure">("pick");
   const [selectedPreset, setSelectedPreset] = useState("postgres");
+  const [selectedHelmPreset, setSelectedHelmPreset] = useState("ingress-nginx");
   const [name, setName] = useState("");
   const [port, setPort] = useState(5432);
   const [envVars, setEnvVars] = useState<FieldEnvVar[]>([]);
   const [creating, setCreating] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [helmAvailable, setHelmAvailable] = useState(true);
   const nameRef = useRef<HTMLInputElement>(null);
+
   const preset = FIELD_PRESETS[selectedPreset];
-  const t = getType(preset.typeId);
+  const helmPreset = HELM_PRESETS[selectedHelmPreset];
+  const t = getType(tab === "helm" ? helmPreset.typeId : preset.typeId);
+
+  useEffect(() => {
+    safeInvoke<boolean>("helm_available")
+      .then(setHelmAvailable)
+      .catch(() => setHelmAvailable(false));
+  }, []);
+
   const selectPreset = (key: string) => {
     setSelectedPreset(key);
     const p = FIELD_PRESETS[key];
@@ -1306,16 +1710,28 @@ function AddFieldModal({
     setStep("configure");
     setTimeout(() => nameRef.current?.focus(), 60);
   };
-  const previewFiles = Object.keys(
-    generateConfigs(
-      name || selectedPreset,
-      preset,
-      projectNamespace,
-      port,
-      envVars,
-    ),
-  );
-  const handleCreate = async () => {
+
+  const selectHelmPreset = (key: string) => {
+    setSelectedHelmPreset(key);
+    setName(key);
+    setStep("configure");
+    setTimeout(() => nameRef.current?.focus(), 60);
+  };
+
+  const previewFiles =
+    tab === "helm"
+      ? Object.keys(generateHelmConfigs(name || selectedHelmPreset, helmPreset))
+      : Object.keys(
+          generateConfigs(
+            name || selectedPreset,
+            preset,
+            projectNamespace,
+            port,
+            envVars,
+          ),
+        );
+
+  const handleCreateRaw = async () => {
     if (!name.trim() || creating) return;
     setCreating(true);
     setResult(null);
@@ -1375,10 +1791,108 @@ function AddFieldModal({
       replicas: preset.replicas,
       x: 30 + Math.random() * 30,
       y: 30 + Math.random() * 30,
+      source: "raw",
     });
     setCreating(false);
     setTimeout(onClose, 1500);
   };
+
+  const handleCreateHelm = async () => {
+    if (!name.trim() || creating) return;
+    setCreating(true);
+    setResult(null);
+    const safeName = name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-");
+    const files = generateHelmConfigs(safeName, helmPreset);
+
+    // Step 1 — save files
+    setResult("Saving files...");
+    const errors: string[] = [];
+    for (const [rel, content] of Object.entries(files)) {
+      try {
+        await safeInvoke("save_yaml_file", {
+          filePath: `${projectPath}/${rel}`,
+          content,
+        });
+      } catch (e) {
+        errors.push(`${rel}: ${e}`);
+      }
+    }
+    if (errors.length > 0) {
+      setResult(`⚠ Save failed: ${errors[0]}`);
+      setCreating(false);
+      return;
+    }
+
+    const componentDir = `${projectPath}/infra/${safeName}`;
+
+    // Step 2 — helm template (render to rendered/)
+    setResult("Running helm template...");
+    let renderedCount = 0;
+    try {
+      const renderResult = await safeInvoke<HelmRenderResult>("helm_template", {
+        componentDir,
+        releaseName: safeName,
+        namespace: helmPreset.defaultNamespace,
+      });
+      if (renderResult.error) {
+        setResult(
+          `⚠ Files saved, render failed: ${renderResult.error.slice(0, 80)}`,
+        );
+        setCreating(false);
+        return;
+      }
+      renderedCount = renderResult.rendered_files.length;
+    } catch (e) {
+      setResult(`⚠ helm CLI not found — files saved, skipping deploy`);
+      setCreating(false);
+      return;
+    }
+
+    // Step 3 — helm upgrade --install
+    setResult("Deploying to cluster...");
+    try {
+      await safeInvoke<string>("helm_install", {
+        componentDir,
+        releaseName: safeName,
+        namespace: helmPreset.defaultNamespace,
+      });
+      setResult(`✓ Deployed · ${renderedCount} manifests`);
+    } catch (e) {
+      setResult(`⚠ Rendered OK, deploy failed: ${String(e).slice(0, 70)}`);
+    }
+
+    const chartPath = `${projectPath}/infra/${safeName}/helm/Chart.yaml`;
+    onAdd({
+      id: `helm-${safeName}-${Date.now()}`,
+      label: safeName,
+      kind: "HelmRelease",
+      image: `helm:${helmPreset.chartName}/${helmPreset.version}`,
+      type_id: helmPreset.typeId,
+      typeId: helmPreset.typeId,
+      namespace: helmPreset.defaultNamespace,
+      file_path: chartPath,
+      filePath: chartPath,
+      replicas: null,
+      x: 30 + Math.random() * 30,
+      y: 30 + Math.random() * 30,
+      source: "helm",
+      helm: {
+        release_name: safeName,
+        namespace: helmPreset.defaultNamespace,
+        chart_name: helmPreset.chartName,
+        chart_version: helmPreset.version,
+        repo: helmPreset.repo,
+        values_path: `${projectPath}/infra/${safeName}/helm/values.yaml`,
+        rendered_dir: `${projectPath}/infra/${safeName}/rendered`,
+      },
+    });
+    setCreating(false);
+    setTimeout(onClose, 1800);
+  };
+
   return (
     <div
       style={{
@@ -1417,6 +1931,7 @@ function AddFieldModal({
           overflow: "hidden",
         }}
       >
+        {/* Header */}
         <div
           style={{
             padding: "0.9vw 1.3vw",
@@ -1448,7 +1963,9 @@ function AddFieldModal({
             <span
               style={{ color: "white", fontWeight: 600, fontSize: "0.95vw" }}
             >
-              {step === "pick" ? "Add Field" : `Configure · ${selectedPreset}`}
+              {step === "pick"
+                ? "Add Field"
+                : `Configure · ${tab === "helm" ? selectedHelmPreset : selectedPreset}`}
             </span>
             <span
               style={{
@@ -1481,12 +1998,51 @@ function AddFieldModal({
             ✕
           </button>
         </div>
+
+        {/* Tab switcher */}
         {step === "pick" && (
+          <div
+            style={{
+              display: "flex",
+              gap: "0.3vw",
+              padding: "0.6vw 1.3vw 0",
+              flexShrink: 0,
+            }}
+          >
+            {(["raw", "helm"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                style={{
+                  background:
+                    tab === t
+                      ? "rgba(59,130,246,0.15)"
+                      : "rgba(255,255,255,0.03)",
+                  border: `1px solid ${tab === t ? "rgba(96,165,250,0.4)" : "rgba(255,255,255,0.07)"}`,
+                  borderRadius: "0.4vw",
+                  color: tab === t ? "#93c5fd" : "rgba(255,255,255,0.35)",
+                  fontSize: "0.72vw",
+                  padding: "0.3vw 0.9vw",
+                  cursor: "pointer",
+                  fontFamily: "monospace",
+                  fontWeight: tab === t ? 600 : 400,
+                }}
+              >
+                {t === "raw"
+                  ? "⊞ Raw YAML"
+                  : `⛵ Helm Chart${!helmAvailable ? " (install helm)" : ""}`}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Pick step — Raw */}
+        {step === "pick" && tab === "raw" && (
           <div
             style={{
               flex: 1,
               overflowY: "auto",
-              padding: "1vw 1.3vw",
+              padding: "0.8vw 1.3vw 1vw",
               minHeight: 0,
             }}
           >
@@ -1613,7 +2169,142 @@ function AddFieldModal({
             </div>
           </div>
         )}
-        {step === "configure" && (
+
+        {/* Pick step — Helm */}
+        {step === "pick" && tab === "helm" && (
+          <div
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: "0.8vw 1.3vw 1vw",
+              minHeight: 0,
+            }}
+          >
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, 1fr)",
+                gap: "0.5vw",
+              }}
+            >
+              {Object.entries(HELM_PRESETS).map(([key, p]) => {
+                const tt = getType(p.typeId);
+                return (
+                  <div
+                    key={key}
+                    onClick={() => selectHelmPreset(key)}
+                    style={{
+                      padding: "0.85vw 1vw",
+                      borderRadius: "0.6vw",
+                      border: "1.5px solid rgba(255,255,255,0.07)",
+                      background: "rgba(255,255,255,0.02)",
+                      cursor: "pointer",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.35vw",
+                      transition: "all 0.12s",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = tt.bg;
+                      e.currentTarget.style.borderColor = tt.border
+                        .replace("0.6)", "0.5)")
+                        .replace("0.55)", "0.45)");
+                      e.currentTarget.style.boxShadow = `0 0 16px ${tt.shadow}`;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background =
+                        "rgba(255,255,255,0.02)";
+                      e.currentTarget.style.borderColor =
+                        "rgba(255,255,255,0.07)";
+                      e.currentTarget.style.boxShadow = "none";
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.4vw",
+                        }}
+                      >
+                        <span style={{ fontSize: "1vw" }}>⛵</span>
+                        <span
+                          style={{
+                            color: "white",
+                            fontWeight: 600,
+                            fontSize: "0.82vw",
+                          }}
+                        >
+                          {key}
+                        </span>
+                      </div>
+                      <span
+                        style={{
+                          fontSize: "0.58vw",
+                          color: tt.accent,
+                          padding: "0.1vw 0.4vw",
+                          borderRadius: "0.25vw",
+                          background: `${tt.accent}18`,
+                          border: `1px solid ${tt.accent}33`,
+                        }}
+                      >
+                        {tt.label}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        color: "rgba(255,255,255,0.3)",
+                        fontSize: "0.63vw",
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {p.description}
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.4vw",
+                      }}
+                    >
+                      <span
+                        style={{
+                          color: "rgba(255,255,255,0.18)",
+                          fontSize: "0.58vw",
+                          fontFamily: "monospace",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          flex: 1,
+                        }}
+                      >
+                        {p.chartName}
+                      </span>
+                      <span
+                        style={{
+                          color: tt.accent,
+                          fontSize: "0.6vw",
+                          flexShrink: 0,
+                        }}
+                      >
+                        v{p.version}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Configure step — Raw */}
+        {step === "configure" && tab === "raw" && (
           <div
             style={{
               flex: 1,
@@ -1674,7 +2365,7 @@ function AddFieldModal({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") handleCreate();
+                  if (e.key === "Enter") handleCreateRaw();
                   if (e.key === "Escape") onClose();
                 }}
                 placeholder={selectedPreset}
@@ -1928,7 +2619,7 @@ function AddFieldModal({
                 Cancel
               </button>
               <button
-                onClick={handleCreate}
+                onClick={handleCreateRaw}
                 disabled={creating || !!result}
                 style={{
                   flex: 2.5,
@@ -1959,10 +2650,271 @@ function AddFieldModal({
             </div>
           </div>
         )}
+
+        {/* Configure step — Helm */}
+        {step === "configure" && tab === "helm" && (
+          <div
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: "1vw 1.3vw",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.85vw",
+              minHeight: 0,
+            }}
+          >
+            <div
+              style={{
+                padding: "0.65vw 0.9vw",
+                background: t.bg,
+                border: `1px solid ${t.border}`,
+                borderRadius: "0.5vw",
+                boxShadow: `0 0 14px ${t.shadow}`,
+                display: "flex",
+                alignItems: "center",
+                gap: "0.6vw",
+                flexShrink: 0,
+              }}
+            >
+              <span style={{ fontSize: "1.1vw" }}>⛵</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    color: t.color,
+                    fontWeight: 600,
+                    fontSize: "0.82vw",
+                  }}
+                >
+                  {helmPreset.description}
+                </div>
+                <div
+                  style={{
+                    color: "rgba(255,255,255,0.3)",
+                    fontSize: "0.62vw",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {helmPreset.chartName} v{helmPreset.version} ·{" "}
+                  {helmPreset.repo}
+                </div>
+              </div>
+              {!helmAvailable && (
+                <span
+                  style={{
+                    color: "#fbbf24",
+                    fontSize: "0.6vw",
+                    padding: "0.15vw 0.5vw",
+                    border: "1px solid rgba(251,191,36,0.3)",
+                    borderRadius: "0.25vw",
+                    background: "rgba(251,191,36,0.08)",
+                    flexShrink: 0,
+                  }}
+                >
+                  helm not found
+                </span>
+              )}
+            </div>
+            <div>
+              <label
+                style={{
+                  display: "block",
+                  color: "rgba(255,255,255,0.3)",
+                  fontSize: "0.62vw",
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  marginBottom: "0.3vw",
+                }}
+              >
+                Release name
+              </label>
+              <input
+                ref={nameRef}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleCreateHelm();
+                  if (e.key === "Escape") onClose();
+                }}
+                placeholder={selectedHelmPreset}
+                style={{
+                  width: "100%",
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: "0.45vw",
+                  color: "white",
+                  fontSize: "0.82vw",
+                  padding: "0.55vw 0.7vw",
+                  outline: "none",
+                  fontFamily: "monospace",
+                }}
+                onFocus={(e) =>
+                  (e.target.style.borderColor = "rgba(96,165,250,0.6)")
+                }
+                onBlur={(e) =>
+                  (e.target.style.borderColor = "rgba(255,255,255,0.1)")
+                }
+              />
+            </div>
+            <div
+              style={{
+                padding: "0.5vw 0.7vw",
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.06)",
+                borderRadius: "0.4vw",
+              }}
+            >
+              <div
+                style={{
+                  color: "rgba(255,255,255,0.22)",
+                  fontSize: "0.58vw",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  marginBottom: "0.18vw",
+                }}
+              >
+                Namespace
+              </div>
+              <div
+                style={{
+                  color: t.color,
+                  fontSize: "0.72vw",
+                  fontFamily: "monospace",
+                }}
+              >
+                {helmPreset.defaultNamespace}
+              </div>
+            </div>
+            <div>
+              <label
+                style={{
+                  display: "block",
+                  color: "rgba(255,255,255,0.3)",
+                  fontSize: "0.62vw",
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  marginBottom: "0.3vw",
+                }}
+              >
+                Will create
+              </label>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "0.18vw",
+                }}
+              >
+                {previewFiles.map((f) => (
+                  <div
+                    key={f}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.35vw",
+                    }}
+                  >
+                    <span style={{ color: t.accent, fontSize: "0.6vw" }}>
+                      ◦
+                    </span>
+                    <span
+                      style={{
+                        color: "rgba(255,255,255,0.28)",
+                        fontSize: "0.63vw",
+                        fontFamily: "monospace",
+                      }}
+                    >
+                      {f}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                gap: "0.5vw",
+                flexShrink: 0,
+                paddingBottom: "0.2vw",
+              }}
+            >
+              <button
+                onClick={onClose}
+                style={{
+                  flex: 1,
+                  background: "rgba(255,255,255,0.05)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: "0.5vw",
+                  color: "rgba(255,255,255,0.4)",
+                  fontSize: "0.78vw",
+                  padding: "0.6vw 0",
+                  cursor: "pointer",
+                  fontFamily: "monospace",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateHelm}
+                disabled={
+                  creating || result?.startsWith("✓") || result?.startsWith("⚠")
+                }
+                style={{
+                  flex: 2.5,
+                  background: result?.startsWith("✓")
+                    ? "rgba(16,185,129,0.25)"
+                    : result?.startsWith("⚠")
+                      ? "rgba(234,88,12,0.25)"
+                      : creating
+                        ? "rgba(37,99,235,0.4)"
+                        : `linear-gradient(135deg, ${t.accent}bb, ${t.accent})`,
+                  border: `1px solid ${t.border}`,
+                  borderRadius: "0.5vw",
+                  color: result?.startsWith("✓")
+                    ? "#6ee7b7"
+                    : result?.startsWith("⚠")
+                      ? "#fdba74"
+                      : "white",
+                  fontSize: "0.78vw",
+                  fontWeight: 600,
+                  padding: "0.6vw 0",
+                  cursor: creating ? "not-allowed" : "pointer",
+                  fontFamily: "monospace",
+                  transition: "all 0.15s",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "0.5vw",
+                }}
+              >
+                {creating &&
+                  !result?.startsWith("✓") &&
+                  !result?.startsWith("⚠") && (
+                    <div
+                      style={{
+                        width: "0.7vw",
+                        height: "0.7vw",
+                        borderRadius: "50%",
+                        border: "1.5px solid rgba(255,255,255,0.3)",
+                        borderTopColor: "white",
+                        animation: "spin 0.7s linear infinite",
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
+                {result || "Generate & Deploy →"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
+
+// ─── NamespaceSwitcher ────────────────────────────────────────────────────────
 
 function NamespaceSwitcher({
   namespaces,
@@ -2106,6 +3058,8 @@ function NamespaceSwitcher({
   );
 }
 
+// ─── FieldConfigPanel ─────────────────────────────────────────────────────────
+
 function FieldConfigPanel({
   node,
   fieldStatus,
@@ -2118,10 +3072,15 @@ function FieldConfigPanel({
   const [replicaValue, setReplicaValue] = useState(1);
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<string | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const [renderResult, setRenderResult] = useState<string | null>(null);
+
   useEffect(() => {
     if (node?.replicas != null) setReplicaValue(node.replicas);
     setApplyResult(null);
+    setRenderResult(null);
   }, [node?.id]);
+
   const handleApply = async () => {
     if (!node) return;
     setApplying(true);
@@ -2136,6 +3095,51 @@ function FieldConfigPanel({
       setTimeout(() => setApplyResult(null), 3000);
     }
   };
+
+  const handleRerender = async () => {
+    if (!node?.helm) return;
+    setRendering(true);
+    setRenderResult(null);
+    try {
+      const componentDir = node.helm.rendered_dir.replace(/\/rendered$/, "");
+      const result = await safeInvoke<HelmRenderResult>("helm_template", {
+        componentDir,
+        releaseName: node.helm.release_name,
+        namespace: node.helm.namespace,
+      });
+      if (result.error) {
+        setRenderResult(`✗ ${result.error.slice(0, 60)}`);
+      } else {
+        setRenderResult(`✓ ${result.rendered_files.length} files rendered`);
+      }
+    } catch (e) {
+      setRenderResult(`✗ ${String(e).slice(0, 60)}`);
+    } finally {
+      setRendering(false);
+      setTimeout(() => setRenderResult(null), 4000);
+    }
+  };
+
+  const handleHelmInstall = async () => {
+    if (!node?.helm) return;
+    setApplying(true);
+    setApplyResult(null);
+    try {
+      const componentDir = node.helm.rendered_dir.replace(/\/rendered$/, "");
+      const out = await safeInvoke<string>("helm_install", {
+        componentDir,
+        releaseName: node.helm.release_name,
+        namespace: node.helm.namespace,
+      });
+      setApplyResult(`✓ Installed`);
+    } catch (e) {
+      setApplyResult(`✗ ${String(e).slice(0, 60)}`);
+    } finally {
+      setApplying(false);
+      setTimeout(() => setApplyResult(null), 4000);
+    }
+  };
+
   if (!node)
     return (
       <div
@@ -2156,10 +3160,13 @@ function FieldConfigPanel({
         </span>
       </div>
     );
+
   const t = getType(node.typeId);
   const sc = fieldStatus
     ? STATUS_COLORS[fieldStatus.status as keyof typeof STATUS_COLORS]
     : STATUS_COLORS.gray;
+  const isHelm = node.source === "helm";
+
   return (
     <div
       style={{
@@ -2172,6 +3179,7 @@ function FieldConfigPanel({
         paddingRight: "0.3vw",
       }}
     >
+      {/* Node header */}
       <div
         style={{
           display: "flex",
@@ -2185,7 +3193,7 @@ function FieldConfigPanel({
           flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: "1vw" }}>{t.icon}</span>
+        <span style={{ fontSize: "1vw" }}>{isHelm ? "⛵" : t.icon}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
@@ -2200,12 +3208,156 @@ function FieldConfigPanel({
             {node.label}
           </div>
           <div style={{ color: "rgba(255,255,255,0.3)", fontSize: "0.63vw" }}>
-            {node.kind} · {node.namespace}
+            {isHelm
+              ? `HelmRelease · ${node.namespace}`
+              : `${node.kind} · ${node.namespace}`}
           </div>
         </div>
         {fieldStatus && <TrafficLight status={fieldStatus.status} size={9} />}
       </div>
-      {fieldStatus && (
+
+      {/* Helm metadata */}
+      {isHelm && node.helm && (
+        <>
+          <div
+            style={{
+              padding: "0.5vw 0.7vw",
+              background: "rgba(255,255,255,0.03)",
+              border: "1px solid rgba(255,255,255,0.06)",
+              borderRadius: "0.4vw",
+              flexShrink: 0,
+            }}
+          >
+            <div
+              style={{
+                color: "rgba(255,255,255,0.22)",
+                fontSize: "0.58vw",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                marginBottom: "0.25vw",
+              }}
+            >
+              Chart
+            </div>
+            <div
+              style={{
+                color: t.color,
+                fontSize: "0.72vw",
+                fontFamily: "monospace",
+              }}
+            >
+              {node.helm.chart_name}{" "}
+              <span style={{ color: "rgba(255,255,255,0.35)" }}>
+                v{node.helm.chart_version}
+              </span>
+            </div>
+            <div
+              style={{
+                color: "rgba(255,255,255,0.22)",
+                fontSize: "0.6vw",
+                marginTop: "0.15vw",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {node.helm.repo}
+            </div>
+          </div>
+          <div
+            style={{
+              padding: "0.5vw 0.7vw",
+              background: "rgba(255,255,255,0.02)",
+              border: "1px solid rgba(255,255,255,0.05)",
+              borderRadius: "0.4vw",
+              flexShrink: 0,
+            }}
+          >
+            <div
+              style={{
+                color: "rgba(255,255,255,0.18)",
+                fontSize: "0.58vw",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                marginBottom: "0.18vw",
+              }}
+            >
+              Rendered dir
+            </div>
+            <div
+              style={{
+                color: "rgba(255,255,255,0.3)",
+                fontSize: "0.63vw",
+                fontFamily: "monospace",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {node.helm.rendered_dir.split("/").slice(-4).join("/")}
+            </div>
+          </div>
+          <button
+            onClick={handleRerender}
+            disabled={rendering}
+            style={{
+              width: "100%",
+              background: rendering
+                ? "rgba(22,163,74,0.2)"
+                : "linear-gradient(135deg, rgba(22,163,74,0.25), rgba(22,163,74,0.4))",
+              border: "1px solid rgba(74,222,128,0.35)",
+              borderRadius: "0.4vw",
+              color: renderResult?.startsWith("✓")
+                ? "#6ee7b7"
+                : renderResult?.startsWith("✗")
+                  ? "#fca5a5"
+                  : "#bbf7d0",
+              fontSize: "0.78vw",
+              fontWeight: 600,
+              padding: "0.55vw 0",
+              cursor: rendering ? "not-allowed" : "pointer",
+              fontFamily: "monospace",
+              flexShrink: 0,
+              transition: "all 0.15s",
+            }}
+          >
+            {rendering
+              ? "Rendering..."
+              : renderResult || "↻ Re-render Templates"}
+          </button>
+          <button
+            onClick={handleHelmInstall}
+            disabled={applying}
+            style={{
+              width: "100%",
+              background: applying
+                ? "rgba(37,99,235,0.4)"
+                : "linear-gradient(135deg, #1e3a5f, #1e40af)",
+              border: "1px solid rgba(59,130,246,0.4)",
+              borderRadius: "0.4vw",
+              color: applyResult?.startsWith("✓")
+                ? "#6ee7b7"
+                : applyResult?.startsWith("✗")
+                  ? "#fca5a5"
+                  : "#bfdbfe",
+              fontSize: "0.82vw",
+              padding: "0.65vw 0",
+              cursor: applying ? "not-allowed" : "pointer",
+              fontFamily: "monospace",
+              fontWeight: 600,
+              transition: "all 0.15s",
+              flexShrink: 0,
+            }}
+          >
+            {applying
+              ? "Installing..."
+              : applyResult || "helm upgrade --install →"}
+          </button>
+        </>
+      )}
+
+      {/* Cluster status for raw nodes */}
+      {!isHelm && fieldStatus && (
         <div
           style={{
             display: "grid",
@@ -2249,7 +3401,9 @@ function FieldConfigPanel({
           ))}
         </div>
       )}
-      {node.replicas != null && (
+
+      {/* Replicas for raw nodes */}
+      {!isHelm && node.replicas != null && (
         <div
           style={{
             background: "rgba(255,255,255,0.03)",
@@ -2350,7 +3504,9 @@ function FieldConfigPanel({
           </div>
         </div>
       )}
-      {node.image && (
+
+      {/* Image for raw nodes */}
+      {!isHelm && node.image && (
         <div
           style={{
             padding: "0.45vw 0.7vw",
@@ -2385,6 +3541,8 @@ function FieldConfigPanel({
           </div>
         </div>
       )}
+
+      {/* File path */}
       {(node.filePath || node.file_path) && (
         <div
           style={{
@@ -2404,7 +3562,7 @@ function FieldConfigPanel({
               marginBottom: "0.18vw",
             }}
           >
-            File
+            {isHelm ? "Chart.yaml" : "File"}
           </div>
           <div
             style={{
@@ -2416,10 +3574,12 @@ function FieldConfigPanel({
               whiteSpace: "nowrap",
             }}
           >
-            {(node.filePath || node.file_path).split("/").slice(-3).join("/")}
+            {(node.filePath || node.file_path).split("/").slice(-4).join("/")}
           </div>
         </div>
       )}
+
+      {/* Pods */}
       {fieldStatus && fieldStatus.pods.length > 0 && (
         <div
           style={{
@@ -2489,7 +3649,9 @@ function FieldConfigPanel({
           ))}
         </div>
       )}
-      {node.replicas != null && (
+
+      {/* Apply button for raw nodes */}
+      {!isHelm && node.replicas != null && (
         <button
           onClick={handleApply}
           disabled={applying}
@@ -2522,31 +3684,6 @@ function FieldConfigPanel({
   );
 }
 
-// ─── deriveRelatedFiles — по пути statefulset/deployment находим все связанные файлы ────
-
-function deriveRelatedFiles(mainFilePath: string): string[] {
-  if (!mainFilePath) return [];
-  const files: string[] = [mainFilePath];
-  const dir = mainFilePath.substring(0, mainFilePath.lastIndexOf("/"));
-  const filename = mainFilePath.substring(mainFilePath.lastIndexOf("/") + 1);
-  // имя без суффикса (-statefulset.yaml, -deployment.yaml, etc.)
-  const base = filename
-    .replace(/-statefulset\.ya?ml$/, "")
-    .replace(/-deployment\.ya?ml$/, "")
-    .replace(/\.ya?ml$/, "");
-
-  const siblings = [
-    `${dir}/${base}-secret.yaml`,
-    `${dir}/${base}-configmap.yaml`,
-    `${dir}/${base}-service.yaml`,
-    `${dir}/${base}-headless-svc.yaml`,
-  ];
-  for (const s of siblings) {
-    if (s !== mainFilePath) files.push(s);
-  }
-  return files;
-}
-
 // ─── DeleteConfirmModal ───────────────────────────────────────────────────────
 
 function DeleteConfirmModal({
@@ -2563,6 +3700,7 @@ function DeleteConfirmModal({
 }) {
   const [mode, setMode] = useState<"full" | "cluster_only" | "ui_only">("full");
   const [deleting, setDeleting] = useState(false);
+  const isHelm = node.source === "helm";
   const t = (() => {
     const types: Record<
       string,
@@ -2593,6 +3731,11 @@ function DeleteConfirmModal({
         accent: "#7c3aed",
         bg: "rgba(18,0,61,0.95)",
       },
+      infra: {
+        border: "rgba(74,222,128,0.5)",
+        accent: "#16a34a",
+        bg: "rgba(10,30,10,0.95)",
+      },
     };
     return (
       types[(node as any).typeId || (node as any).type_id || "service"] || {
@@ -2604,27 +3747,30 @@ function DeleteConfirmModal({
   })();
 
   const filePath = (node as any).filePath || node.file_path;
-  const relFiles = deriveRelatedFiles(filePath);
-
-  const handleConfirm = async () => {
-    setDeleting(true);
-    try {
-      await onConfirm(node, mode);
-    } finally {
-      setDeleting(false);
-    }
-  };
+  const relFiles =
+    isHelm && node.helm
+      ? [
+          node.helm.values_path,
+          node.helm.values_path.replace("values.yaml", "values.prod.yaml"),
+          node.helm.values_path.replace("values.yaml", "Chart.yaml"),
+          node.helm.rendered_dir,
+        ]
+      : deriveRelatedFiles(filePath);
 
   const modeLabels = {
     full: {
-      title: "Delete everything",
-      desc: "Remove YAML files from disk + kubectl delete from cluster",
+      title: isHelm ? "Delete everything" : "Delete everything",
+      desc: isHelm
+        ? "Remove helm/ + rendered/ dirs + helm uninstall from cluster"
+        : "Remove YAML files from disk + kubectl delete from cluster",
       icon: "⚠",
       color: "#f87171",
     },
     cluster_only: {
       title: "Cluster only",
-      desc: "kubectl delete from cluster, keep YAML files on disk",
+      desc: isHelm
+        ? "helm uninstall from cluster, keep files on disk"
+        : "kubectl delete from cluster, keep YAML files on disk",
       icon: "☁",
       color: "#fbbf24",
     },
@@ -2634,6 +3780,15 @@ function DeleteConfirmModal({
       icon: "◈",
       color: "#94a3b8",
     },
+  };
+
+  const handleConfirm = async () => {
+    setDeleting(true);
+    try {
+      await onConfirm(node, mode);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -2666,13 +3821,13 @@ function DeleteConfirmModal({
           borderRadius: "1vw",
           background: t.bg,
           border: `1px solid ${t.border}`,
-          boxShadow: `0 0 40px rgba(239,68,68,0.15), 0 24px 60px rgba(0,0,0,0.7)`,
+          boxShadow:
+            "0 0 40px rgba(239,68,68,0.15), 0 24px 60px rgba(0,0,0,0.7)",
           fontFamily: "monospace",
           animation: "modalIn 0.2s cubic-bezier(0.34,1.45,0.64,1) both",
           overflow: "hidden",
         }}
       >
-        {/* Header */}
         <div
           style={{
             padding: "0.8vw 1.2vw",
@@ -2687,7 +3842,7 @@ function DeleteConfirmModal({
             <span
               style={{ color: "white", fontWeight: 700, fontSize: "0.9vw" }}
             >
-              Delete Field
+              Delete {isHelm ? "Helm Release" : "Field"}
             </span>
           </div>
           <button
@@ -2703,7 +3858,6 @@ function DeleteConfirmModal({
             ✕
           </button>
         </div>
-
         <div
           style={{
             padding: "1vw 1.2vw",
@@ -2712,7 +3866,6 @@ function DeleteConfirmModal({
             gap: "0.8vw",
           }}
         >
-          {/* Node info */}
           <div
             style={{
               padding: "0.6vw 0.9vw",
@@ -2737,7 +3890,9 @@ function DeleteConfirmModal({
                   marginTop: "0.1vw",
                 }}
               >
-                {node.kind} · ns: {node.namespace}
+                {isHelm
+                  ? `HelmRelease · ns: ${node.namespace}`
+                  : `${node.kind} · ns: ${node.namespace}`}
               </div>
             </div>
             <span
@@ -2753,8 +3908,6 @@ function DeleteConfirmModal({
               {(node as any).typeId || node.type_id}
             </span>
           </div>
-
-          {/* Mode selector */}
           <div
             style={{ display: "flex", flexDirection: "column", gap: "0.35vw" }}
           >
@@ -2813,9 +3966,7 @@ function DeleteConfirmModal({
               );
             })}
           </div>
-
-          {/* Files list (only for full mode) */}
-          {mode === "full" && filePath && (
+          {mode === "full" && (
             <div
               style={{
                 padding: "0.5vw 0.7vw",
@@ -2848,13 +3999,11 @@ function DeleteConfirmModal({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  ✕ {f.split("/").slice(-3).join("/")}
+                  ✕ {f.split("/").slice(-4).join("/")}
                 </div>
               ))}
             </div>
           )}
-
-          {/* Buttons */}
           <div style={{ display: "flex", gap: "0.5vw", marginTop: "0.2vw" }}>
             <button
               onClick={onClose}
@@ -2892,7 +4041,7 @@ function DeleteConfirmModal({
                 boxShadow: "0 0 16px rgba(239,68,68,0.2)",
               }}
             >
-              {deleting ? "Deleting..." : `Confirm Delete`}
+              {deleting ? "Deleting..." : "Confirm Delete"}
             </button>
           </div>
         </div>
@@ -2900,6 +4049,8 @@ function DeleteConfirmModal({
     </div>
   );
 }
+
+// ─── ContextMenu ──────────────────────────────────────────────────────────────
 
 function ContextMenu({
   menu,
@@ -2922,6 +4073,7 @@ function ContextMenu({
     if (renaming) inputRef.current?.focus();
   }, [renaming]);
   if (!menu.visible) return null;
+  const isHelm = menu.kind === "HelmRelease";
   const items = [
     {
       id: "rename",
@@ -2933,7 +4085,7 @@ function ContextMenu({
     {
       id: "openfile",
       icon: "◫",
-      label: "Open YAML",
+      label: isHelm ? "Open Chart.yaml" : "Open YAML",
       color: "#93c5fd",
       action: () => {
         onOpenFile(menu.nodeId!);
@@ -3100,6 +4252,8 @@ function ContextMenu({
   );
 }
 
+// ─── YamlModal ────────────────────────────────────────────────────────────────
+
 function YamlModal({ node, onClose }: { node: YamlNode; onClose: () => void }) {
   const [content, setContent] = useState("Loading...");
   useEffect(() => {
@@ -3215,6 +4369,8 @@ function YamlModal({ node, onClose }: { node: YamlNode; onClose: () => void }) {
   );
 }
 
+// ─── DraggableNode ────────────────────────────────────────────────────────────
+
 function DraggableNode({
   node,
   fieldStatus,
@@ -3234,6 +4390,7 @@ function DraggableNode({
 }) {
   const t = getType(node.typeId);
   const status = fieldStatus?.status || "gray";
+  const isHelm = node.source === "helm";
   return (
     <div
       onMouseDown={(e) => {
@@ -3256,7 +4413,7 @@ function DraggableNode({
       <div
         style={{
           background: t.bg,
-          border: `1px solid ${isSelected ? t.border.replace("0.6)", "1)") : t.border}`,
+          border: `1px solid ${isSelected ? t.border.replace("0.6)", "1)").replace("0.55)", "1)") : t.border}`,
           borderRadius: "0.4vw",
           padding: "0.6vw 1vw",
           color: t.color,
@@ -3276,24 +4433,25 @@ function DraggableNode({
         }}
       >
         <TrafficLight status={status} size={8} />
-        <span style={{ fontSize: "0.85vw", opacity: 0.8 }}>{t.icon}</span>
+        <span style={{ fontSize: "0.85vw", opacity: 0.8 }}>
+          {isHelm ? "⛵" : t.icon}
+        </span>
         <div
           style={{ display: "flex", flexDirection: "column", gap: "0.05vw" }}
         >
           <span>{node.label}</span>
-          {node.kind && (
-            <span style={{ fontSize: "0.6vw", opacity: 0.45, fontWeight: 400 }}>
-              {node.kind}
-              {node.replicas
-                ? ` ×${fieldStatus ? fieldStatus.ready : node.replicas}`
-                : ""}
-            </span>
-          )}
+          <span style={{ fontSize: "0.6vw", opacity: 0.45, fontWeight: 400 }}>
+            {isHelm && node.helm
+              ? `helm · v${node.helm.chart_version}`
+              : `${node.kind}${node.replicas ? ` ×${fieldStatus ? fieldStatus.ready : node.replicas}` : ""}`}
+          </span>
         </div>
       </div>
     </div>
   );
 }
+
+// ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [screen, setScreen] = useState<"selector" | "dashboard">("selector");
@@ -3332,7 +4490,7 @@ export default function App() {
     new Set(nodes.map((n) => n.namespace).filter(Boolean)),
   );
   const visibleNodes = nodes.filter(
-    (n) => !n.namespace || n.namespace === activeNamespace,
+    (n) => !activeNamespace || n.namespace === activeNamespace,
   );
 
   const fetchClusterStatus = useCallback(async () => {
@@ -3426,6 +4584,7 @@ export default function App() {
     dragState.current = null;
     setDraggingId(null);
   }, []);
+
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, node: YamlNode) => {
       e.preventDefault();
@@ -3441,6 +4600,7 @@ export default function App() {
     },
     [],
   );
+
   const handleDelete = useCallback(
     (id: string) => {
       const node = nodes.find((n) => n.id === id);
@@ -3448,11 +4608,13 @@ export default function App() {
     },
     [nodes],
   );
+
   const handleRename = useCallback(
     (id: string, label: string) =>
       setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, label } : n))),
     [],
   );
+
   const handleOpenFile = useCallback(
     (id: string) => {
       const node = nodes.find((n) => n.id === id);
@@ -3461,12 +4623,14 @@ export default function App() {
     },
     [nodes],
   );
+
   const handleAddField = useCallback((node: YamlNode) => {
     setNodes((prev) => [...prev, node]);
   }, []);
   const handleNodeClick = useCallback((node: YamlNode) => {
     setSelectedNode((prev) => (prev?.id === node.id ? null : node));
   }, []);
+
   const handleApplyReplicas = useCallback(
     async (node: YamlNode, replicas: number) => {
       const filePath = node.filePath || node.file_path;
@@ -3508,6 +4672,10 @@ export default function App() {
     return "yellow";
   })();
 
+  // Show all namespaces in switcher but label infra ones
+  const allNsDisplay =
+    allNamespaces.length > 0 ? allNamespaces : [activeNamespace];
+
   return (
     <div
       style={{
@@ -3526,6 +4694,7 @@ export default function App() {
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
     >
+      {/* Topbar */}
       <div
         style={{
           position: "relative",
@@ -3676,9 +4845,7 @@ export default function App() {
             }}
           >
             <NamespaceSwitcher
-              namespaces={
-                allNamespaces.length > 0 ? allNamespaces : [activeNamespace]
-              }
+              namespaces={allNsDisplay}
               active={activeNamespace}
               onChange={setActiveNamespace}
             />
@@ -3723,6 +4890,7 @@ export default function App() {
         </div>
       </div>
 
+      {/* Main grid */}
       <div
         style={{
           flex: 1,
@@ -3733,6 +4901,7 @@ export default function App() {
           minHeight: 0,
         }}
       >
+        {/* Canvas */}
         <div
           style={{
             gridColumn: "1",
@@ -3859,6 +5028,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Config panel */}
         <div
           style={{
             gridColumn: "2",
@@ -3915,6 +5085,7 @@ export default function App() {
           />
         </div>
 
+        {/* AI Assistant */}
         <div
           style={{
             gridColumn: "2",
@@ -3987,7 +5158,7 @@ export default function App() {
                   maxWidth: "85%",
                 }}
               >
-                Deploy postgres to myapp namespace
+                Deploy ingress-nginx via Helm
               </div>
             </div>
             <div
@@ -4026,8 +5197,9 @@ export default function App() {
                   maxWidth: "85%",
                 }}
               >
-                Creating StatefulSet, Service and ConfigMap for postgres in
-                namespace myapp...
+                Generated Chart.yaml wrapper for ingress-nginx v4.10.1,
+                values.yaml with dev defaults, values.prod.yaml, and rendered 6
+                manifests into rendered/
               </div>
             </div>
           </div>
@@ -4076,6 +5248,7 @@ export default function App() {
         </div>
       </div>
 
+      {/* Overlays */}
       <ContextMenu
         menu={contextMenu}
         onClose={() => setContextMenu((m) => ({ ...m, visible: false }))}
@@ -4103,18 +5276,47 @@ export default function App() {
           onClose={() => setDeleteConfirm(null)}
           onConfirm={async (node, mode) => {
             setDeleteConfirm(null);
-            const filePath = node.filePath || node.file_path;
-            const allFiles = deriveRelatedFiles(filePath);
+            const isHelm = node.source === "helm";
             if (mode === "full") {
-              await safeInvoke("delete_field_files", {
-                filePaths: allFiles,
-                namespace: node.namespace,
-              });
+              if (isHelm && node.helm) {
+                const componentDir = node.helm.rendered_dir.replace(
+                  /\/rendered$/,
+                  "",
+                );
+                await safeInvoke("delete_field_files", {
+                  filePaths: [
+                    node.helm.values_path,
+                    node.helm.values_path.replace(
+                      "values.yaml",
+                      "values.prod.yaml",
+                    ),
+                    node.helm.values_path.replace("values.yaml", "Chart.yaml"),
+                  ],
+                  namespace: node.namespace,
+                });
+                await safeInvoke("helm_uninstall", {
+                  releaseName: node.helm.release_name,
+                  namespace: node.helm.namespace,
+                }).catch(() => {});
+              } else {
+                const filePath = node.filePath || node.file_path;
+                await safeInvoke("delete_field_files", {
+                  filePaths: deriveRelatedFiles(filePath),
+                  namespace: node.namespace,
+                });
+              }
             } else if (mode === "cluster_only") {
-              await safeInvoke("kubectl_delete_by_label", {
-                label: node.label,
-                namespace: node.namespace,
-              });
+              if (isHelm && node.helm) {
+                await safeInvoke("helm_uninstall", {
+                  releaseName: node.helm.release_name,
+                  namespace: node.helm.namespace,
+                }).catch(() => {});
+              } else {
+                await safeInvoke("kubectl_delete_by_label", {
+                  label: node.label,
+                  namespace: node.namespace,
+                });
+              }
             }
             setNodes((prev) => prev.filter((n) => n.id !== node.id));
             if (selectedNode?.id === node.id) setSelectedNode(null);
