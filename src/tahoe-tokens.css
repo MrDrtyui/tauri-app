@@ -1,0 +1,181 @@
+/* ═══════════════════════════════════════════════════════════════════
+   ENDFIELD — Catppuccin Mocha × macOS Tahoe Design Tokens
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Base Catppuccin Mocha Palette ─────────────────────────────── */
+:root {
+  /* Catppuccin Mocha Raw */
+  --ctp-base:    #1e1e2e;
+  --ctp-mantle:  #181825;
+  --ctp-crust:   #11111b;
+  --ctp-surface0: #313244;
+  --ctp-surface1: #45475a;
+  --ctp-surface2: #585b70;
+  --ctp-overlay0: #6c7086;
+  --ctp-overlay1: #7f849c;
+  --ctp-overlay2: #9399b2;
+  --ctp-subtext0: #a6adc8;
+  --ctp-subtext1: #bac2de;
+  --ctp-text:    #cdd6f4;
+
+  /* Catppuccin Accents */
+  --ctp-lavender: #b4befe;
+  --ctp-blue:     #89b4fa;
+  --ctp-sapphire: #74c7ec;
+  --ctp-sky:      #89dceb;
+  --ctp-teal:     #94e2d5;
+  --ctp-green:    #a6e3a1;
+  --ctp-yellow:   #f9e2af;
+  --ctp-peach:    #fab387;
+  --ctp-maroon:   #eba0ac;
+  --ctp-red:      #f38ba8;
+  --ctp-mauve:    #cba6f7;
+  --ctp-pink:     #f5c2e7;
+  --ctp-flamingo: #f2cdcd;
+  --ctp-rosewater: #f5e0dc;
+}
+
+/* ── Semantic Design Tokens ─────────────────────────────────────── */
+:root {
+  /* Surfaces (macOS layered depth) */
+  --bg-app:       var(--ctp-crust);     /* #11111b — window chrome */
+  --bg-primary:   var(--ctp-base);      /* #1e1e2e — main background */
+  --bg-surface:   var(--ctp-mantle);    /* #181825 — panels */
+  --bg-elevated:  var(--ctp-surface0);  /* #313244 — cards, hover */
+  --bg-overlay:   rgba(49, 50, 68, 0.85); /* blurred overlays */
+  --bg-modal:     rgba(24, 24, 37, 0.95); /* modals */
+
+  /* Sidebar specific */
+  --bg-sidebar:   #16161f;  /* slightly darker than mantle */
+  --bg-sidebar-hover: rgba(205, 214, 244, 0.05);
+  --bg-sidebar-active: rgba(180, 190, 254, 0.12);
+
+  /* Toolbar */
+  --bg-toolbar:   rgba(17, 17, 27, 0.75);  /* blurred toolbar */
+  --bg-statusbar: var(--ctp-crust);
+
+  /* Text */
+  --text-primary: var(--ctp-text);      /* #cdd6f4 */
+  --text-secondary: var(--ctp-subtext1); /* #bac2de */
+  --text-muted:   var(--ctp-subtext0);  /* #a6adc8 */
+  --text-subtle:  var(--ctp-overlay1);  /* #7f849c */
+  --text-faint:   var(--ctp-overlay0);  /* #6c7086 */
+
+  /* Accents */
+  --accent:       var(--ctp-mauve);     /* #cba6f7 primary accent */
+  --accent-alt:   var(--ctp-lavender);  /* #b4befe secondary */
+  --accent-blue:  var(--ctp-blue);      /* #89b4fa */
+  --accent-green: var(--ctp-green);     /* #a6e3a1 */
+  --accent-red:   var(--ctp-red);       /* #f38ba8 */
+  --accent-yellow: var(--ctp-yellow);   /* #f9e2af */
+  --accent-peach: var(--ctp-peach);     /* #fab387 */
+  --accent-teal:  var(--ctp-teal);      /* #94e2d5 */
+  --accent-sky:   var(--ctp-sapphire);  /* #74c7ec */
+
+  /* Borders */
+  --border-subtle:  rgba(205, 214, 244, 0.06);
+  --border-default: rgba(205, 214, 244, 0.10);
+  --border-strong:  rgba(205, 214, 244, 0.18);
+  --border-accent:  rgba(180, 190, 254, 0.35);
+
+  /* Node type colors — Catppuccin adapted */
+  --node-gateway:    var(--ctp-blue);      /* #89b4fa */
+  --node-service:    var(--ctp-green);     /* #a6e3a1 */
+  --node-database:   var(--ctp-sapphire);  /* #74c7ec */
+  --node-cache:      var(--ctp-peach);     /* #fab387 */
+  --node-queue:      var(--ctp-maroon);    /* #eba0ac */
+  --node-monitoring: var(--ctp-mauve);     /* #cba6f7 */
+  --node-infra:      var(--ctp-teal);      /* #94e2d5 */
+  --node-custom:     var(--ctp-overlay2);  /* #9399b2 */
+
+  /* Status */
+  --status-ok:      var(--ctp-green);
+  --status-warn:    var(--ctp-yellow);
+  --status-error:   var(--ctp-red);
+  --status-unknown: var(--ctp-overlay1);
+
+  /* Radius — macOS Tahoe */
+  --radius-xs:   4px;
+  --radius-sm:   6px;
+  --radius-md:   8px;
+  --radius-lg:   10px;
+  --radius-xl:   12px;
+  --radius-2xl:  14px;
+  --radius-full: 9999px;
+
+  /* Shadows — soft, layered */
+  --shadow-xs:  0 1px 3px rgba(0,0,0,0.3);
+  --shadow-sm:  0 2px 8px rgba(0,0,0,0.4);
+  --shadow-md:  0 4px 16px rgba(0,0,0,0.5);
+  --shadow-lg:  0 8px 32px rgba(0,0,0,0.6);
+  --shadow-xl:  0 16px 48px rgba(0,0,0,0.7);
+  --shadow-modal: 0 24px 64px rgba(0,0,0,0.75), 0 0 0 1px rgba(205,214,244,0.06);
+
+  /* Blur */
+  --blur-sm:  blur(8px);
+  --blur-md:  blur(16px);
+  --blur-lg:  blur(24px);
+
+  /* Transitions — 150–200ms ease-out */
+  --ease-fast:  all 0.12s ease-out;
+  --ease-std:   all 0.18s ease-out;
+  --ease-slow:  all 0.25s ease-out;
+
+  /* Typography */
+  --font-ui:   "SF Pro Display", "SF Pro Text", -apple-system, "Inter", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", monospace;
+  --font-size-xs:  10px;
+  --font-size-sm:  11px;
+  --font-size-md:  12px;
+  --font-size-lg:  13px;
+  --font-size-xl:  15px;
+  --font-size-2xl: 18px;
+  --font-size-3xl: 22px;
+
+  /* Spacing */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--ctp-surface1);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ctp-surface2);
+}
+* { scrollbar-width: thin; scrollbar-color: var(--ctp-surface1) transparent; }
+
+/* ── Keyframes ──────────────────────────────────────────────────── */
+@keyframes ef-fadein {
+  from { opacity: 0; transform: scale(0.98) translateY(4px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0);   }
+}
+@keyframes ef-slidein {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+@keyframes ef-pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+/* ── Focus Ring (macOS style) ───────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid rgba(180, 190, 254, 0.5);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* ── Selection ──────────────────────────────────────────────────── */
+::selection {
+  background: rgba(180, 190, 254, 0.25);
+  color: var(--text-primary);
+}

@@ -7,8 +7,6 @@ interface ResizerProps {
 
 export function Resizer({ direction, onResize }: ResizerProps) {
   const isH = direction === "horizontal";
-  const hovering = useRef(false);
-  const divRef = useRef<HTMLDivElement>(null);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -32,24 +30,19 @@ export function Resizer({ direction, onResize }: ResizerProps) {
 
   return (
     <div
-      ref={divRef}
       onMouseDown={handleMouseDown}
       style={{
         flexShrink: 0,
-        width: isH ? 4 : "100%",
+        width:  isH ? 4 : "100%",
         height: isH ? "100%" : 4,
-        background: "rgba(59,130,246,0.07)",
+        background: "transparent",
         cursor: isH ? "col-resize" : "row-resize",
         position: "relative",
         zIndex: 20,
         transition: "background 0.15s",
       }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background = "rgba(59,130,246,0.5)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = "rgba(59,130,246,0.07)";
-      }}
+      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(203,166,247,0.35)")}
+      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
     />
   );
 }

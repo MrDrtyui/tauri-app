@@ -6,7 +6,12 @@ const explorerGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-explorer",
   tabs: [
-    { id: "tab-explorer", title: "Explorer", contentType: "explorer", icon: "📁" },
+    {
+      id: "tab-explorer",
+      title: "Explorer",
+      contentType: "explorer",
+      icon: "explorer",
+    },
   ],
   activeTabId: "tab-explorer",
 };
@@ -16,7 +21,7 @@ const centerGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-center",
   tabs: [
-    { id: "tab-graph", title: "Schema", contentType: "graph", icon: "⬡" },
+    { id: "tab-graph", title: "Schema", contentType: "graph", icon: "graph" },
   ],
   activeTabId: "tab-graph",
 };
@@ -25,7 +30,12 @@ const inspectorGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-inspector",
   tabs: [
-    { id: "tab-inspector", title: "Properties", contentType: "inspector", icon: "◈" },
+    {
+      id: "tab-inspector",
+      title: "Properties",
+      contentType: "inspector",
+      icon: "inspector",
+    },
   ],
   activeTabId: "tab-inspector",
 };
@@ -34,8 +44,18 @@ const bottomGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-bottom",
   tabs: [
-    { id: "tab-diff",  title: "Cluster Diff", contentType: "clusterDiff",  icon: "⊞" },
-    { id: "tab-logs",  title: "Logs",         contentType: "clusterLogs",  icon: "≡" },
+    {
+      id: "tab-diff",
+      title: "Cluster Diff",
+      contentType: "clusterDiff",
+      icon: "clusterDiff",
+    },
+    {
+      id: "tab-logs",
+      title: "Logs",
+      contentType: "clusterLogs",
+      icon: "clusterLogs",
+    },
   ],
   activeTabId: "tab-diff",
 };
@@ -45,10 +65,10 @@ const bottomGroup: TabGroupNode = {
 export const DEFAULT_LAYOUT: WorkspaceLayout = {
   version: 1,
   areas: [
-    { slot: "left",   size: 260, visible: true,  root: explorerGroup  },
-    { slot: "center", size: 0,   visible: true,  root: centerGroup    },
-    { slot: "right",  size: 300, visible: true,  root: inspectorGroup },
-    { slot: "bottom", size: 220, visible: false, root: bottomGroup    },
+    { slot: "left", size: 260, visible: true, root: explorerGroup },
+    { slot: "center", size: 0, visible: true, root: centerGroup },
+    { slot: "right", size: 300, visible: true, root: inspectorGroup },
+    { slot: "bottom", size: 220, visible: false, root: bottomGroup },
   ],
 };
 
@@ -58,10 +78,10 @@ export const DEFAULT_LAYOUT: WorkspaceLayout = {
 export const GRAPH_ONLY_LAYOUT: WorkspaceLayout = {
   version: 1,
   areas: [
-    { slot: "left",   size: 260, visible: false, root: explorerGroup  },
-    { slot: "center", size: 0,   visible: true,  root: centerGroup    },
-    { slot: "right",  size: 300, visible: false, root: inspectorGroup },
-    { slot: "bottom", size: 220, visible: false, root: bottomGroup    },
+    { slot: "left", size: 260, visible: false, root: explorerGroup },
+    { slot: "center", size: 0, visible: true, root: centerGroup },
+    { slot: "right", size: 300, visible: false, root: inspectorGroup },
+    { slot: "bottom", size: 220, visible: false, root: bottomGroup },
   ],
 };
 
@@ -77,7 +97,9 @@ export const EXAMPLE_LAYOUT_JSON = {
       root: {
         type: "tabgroup",
         id: "tg-explorer",
-        tabs: [{ id: "tab-explorer", title: "Explorer", contentType: "explorer" }],
+        tabs: [
+          { id: "tab-explorer", title: "Explorer", contentType: "explorer" },
+        ],
         activeTabId: "tab-explorer",
       },
     },
@@ -94,8 +116,18 @@ export const EXAMPLE_LAYOUT_JSON = {
           type: "tabgroup",
           id: "tg-center-editor",
           tabs: [
-            { id: "tab-file-1", title: "auth-deployment.yaml", contentType: "file", filePath: "/infra/apps/auth-deployment.yaml" },
-            { id: "tab-file-2", title: "postgres-statefulset.yaml", contentType: "file", filePath: "/infra/databases/postgres-statefulset.yaml" },
+            {
+              id: "tab-file-1",
+              title: "auth-deployment.yaml",
+              contentType: "file",
+              filePath: "/infra/apps/auth-deployment.yaml",
+            },
+            {
+              id: "tab-file-2",
+              title: "postgres-statefulset.yaml",
+              contentType: "file",
+              filePath: "/infra/databases/postgres-statefulset.yaml",
+            },
           ],
           activeTabId: "tab-file-1",
         },
@@ -114,7 +146,9 @@ export const EXAMPLE_LAYOUT_JSON = {
       root: {
         type: "tabgroup",
         id: "tg-inspector",
-        tabs: [{ id: "tab-inspector", title: "Inspector", contentType: "inspector" }],
+        tabs: [
+          { id: "tab-inspector", title: "Inspector", contentType: "inspector" },
+        ],
         activeTabId: "tab-inspector",
       },
     },

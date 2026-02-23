@@ -1,8 +1,13 @@
 @import "tailwindcss";
+@import "./tahoe-tokens.css";
 
 html,
 body,
 #root {
   height: 100%;
-  background-color: #0b1220;
+  background-color: var(--bg-app);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }

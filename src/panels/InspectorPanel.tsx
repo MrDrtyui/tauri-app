@@ -1,27 +1,52 @@
+import {
+  AppIcon,
+  resolveNodeIconName,
+  resolveNodeColor,
+  contentTypeIcon,
+} from "../ui/AppIcon";
 import React from "react";
 import { useIDEStore } from "../store/ideStore";
 
-const STATUS_COLORS = {
-  green:  { dot: "#22c55e", bg: "rgba(34,197,94,0.12)",  text: "#6ee7b7" },
-  yellow: { dot: "#eab308", bg: "rgba(234,179,8,0.12)",  text: "#fef08a" },
-  red:    { dot: "#ef4444", bg: "rgba(239,68,68,0.12)",  text: "#fca5a5" },
-  gray:   { dot: "#475569", bg: "rgba(71,85,105,0.12)",  text: "#94a3b8" },
+// ─── Status badge ─────────────────────────────────────────────────
+
+const STATUS_CFG = {
+  green: {
+    color: "var(--status-ok)",
+    bg: "rgba(166, 227, 161, 0.08)",
+    label: "healthy",
+  },
+  yellow: {
+    color: "var(--status-warn)",
+    bg: "rgba(249, 226, 175, 0.08)",
+    label: "degraded",
+  },
+  red: {
+    color: "var(--status-error)",
+    bg: "rgba(243, 139, 168, 0.08)",
+    label: "error",
+  },
+  gray: {
+    color: "var(--status-unknown)",
+    bg: "rgba(127, 132, 156, 0.08)",
+    label: "unknown",
+  },
 };
 
 function StatusBadge({ status }: { status: string }) {
-  const s = STATUS_COLORS[status as keyof typeof STATUS_COLORS] ?? STATUS_COLORS.gray;
+  const s = STATUS_CFG[status as keyof typeof STATUS_CFG] ?? STATUS_CFG.gray;
   return (
     <span
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 4,
-        padding: "2px 7px",
-        borderRadius: 4,
+        gap: 5,
+        padding: "2px 8px",
+        borderRadius: "var(--radius-full)",
         background: s.bg,
-        color: s.text,
-        fontSize: 10,
-        fontFamily: "monospace",
+        color: s.color,
+        fontSize: "var(--font-size-xs)",
+        fontFamily: "var(--font-mono)",
+        border: `1px solid ${s.color}28`,
       }}
     >
       <span
@@ -29,9 +54,9 @@ function StatusBadge({ status }: { status: string }) {
           width: 5,
           height: 5,
           borderRadius: "50%",
-          background: s.dot,
-          boxShadow: status !== "gray" ? `0 0 5px ${s.dot}` : "none",
+          background: s.color,
           display: "inline-block",
+          flexShrink: 0,
         }}
       />
       {status}
@@ -39,28 +64,47 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function PropRow({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
+// ─── PropRow ──────────────────────────────────────────────────────
+
+function PropRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: React.ReactNode;
+  mono?: boolean;
+}) {
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 8 }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 10,
+        marginBottom: 10,
+      }}
+    >
       <span
         style={{
-          color: "rgba(255,255,255,0.28)",
-          fontSize: 10,
+          color: "var(--text-subtle)",
+          fontSize: "var(--font-size-xs)",
           textTransform: "uppercase",
           letterSpacing: "0.07em",
           flexShrink: 0,
           paddingTop: 1,
-          width: 80,
+          width: 76,
+          fontWeight: 500,
         }}
       >
         {label}
       </span>
       <span
         style={{
-          color: "rgba(255,255,255,0.7)",
-          fontSize: 11,
-          fontFamily: mono ? "monospace" : "inherit",
+          color: "var(--text-secondary)",
+          fontSize: "var(--font-size-sm)",
+          fontFamily: mono ? "var(--font-mono)" : "var(--font-ui)",
           wordBreak: "break-all",
+          lineHeight: 1.5,
         }}
       >
         {value}
@@ -68,6 +112,38 @@ function PropRow({ label, value, mono = false }: { label: string; value: React.R
     </div>
   );
 }
+
+// ─── Section ──────────────────────────────────────────────────────
+
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div
+        style={{
+          color: "var(--text-subtle)",
+          fontSize: "var(--font-size-xs)",
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          fontWeight: 500,
+          marginBottom: 10,
+          paddingBottom: 6,
+          borderBottom: "1px solid var(--border-subtle)",
+        }}
+      >
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ─── InspectorPanel ───────────────────────────────────────────────
 
 export function InspectorPanel() {
   const selectedEntity = useIDEStore((s) => s.selectedEntity);
@@ -79,14 +155,14 @@ export function InspectorPanel() {
     return <EmptyInspector />;
   }
 
-  const { type, id, label, filePath, meta } = selectedEntity;
+  const { type, id, label, filePath } = selectedEntity;
 
-  // Resolve node from real store
-  const node = type === "field"
-    ? nodes.find((n) => n.id === id)
-    : type === "graphNode"
-      ? nodes.find((n) => n.file_path === filePath || n.id === id)
-      : null;
+  const node =
+    type === "field"
+      ? nodes.find((n) => n.id === id)
+      : type === "graphNode"
+        ? nodes.find((n) => n.file_path === filePath || n.id === id)
+        : null;
 
   const clusterInfo = node
     ? clusterStatus?.fields.find((f) => f.label === node.label)
@@ -98,128 +174,153 @@ export function InspectorPanel() {
         display: "flex",
         flexDirection: "column",
         height: "100%",
-        background: "#070f1e",
-        fontFamily: "'JetBrains Mono', monospace",
-        color: "#94a3b8",
+        background: "var(--bg-sidebar)",
+        fontFamily: "var(--font-ui)",
+        color: "var(--text-secondary)",
       }}
     >
       {/* Header */}
       <div
         style={{
-          padding: "10px 12px 8px",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
+          padding: "12px 14px 10px",
+          borderBottom: "1px solid var(--border-subtle)",
           flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <span style={{ fontSize: 14 }}>
-            {type === "file" ? "📄" : type === "graphNode" ? "⬡" : "◈"}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 16 }}>
+            <AppIcon
+              name={
+                type === "file"
+                  ? "fileYaml"
+                  : type === "graphNode"
+                    ? "graph"
+                    : "inspector"
+              }
+              size={15}
+              strokeWidth={1.75}
+            />
           </span>
-          <div>
-            <div style={{ color: "#e2e8f0", fontWeight: 600, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                color: "var(--text-primary)",
+                fontWeight: 500,
+                fontSize: "var(--font-size-md)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
               {label}
             </div>
-            <div style={{ color: "rgba(255,255,255,0.25)", fontSize: 9, marginTop: 2 }}>
-              {type === "file" ? "File" : type === "graphNode" ? "Graph Node" : "Field"}
+            <div
+              style={{
+                color: "var(--text-subtle)",
+                fontSize: "var(--font-size-xs)",
+                marginTop: 2,
+                textTransform: "capitalize",
+              }}
+            >
+              {type === "file"
+                ? "File"
+                : type === "graphNode"
+                  ? "Graph Node"
+                  : "Field"}
             </div>
           </div>
+          {clusterInfo && <StatusBadge status={clusterInfo.status} />}
         </div>
       </div>
 
       {/* Body */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px" }}>
-
-        {/* File info */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "14px 14px" }}>
+        {/* Location */}
         {filePath && (
           <Section title="Location">
-            <PropRow label="Path" value={filePath.split("/").slice(-3).join("/")} mono />
-            <div>
-              <button
-                onClick={() =>
-                  filePath &&
-                  openTab({
+            <PropRow
+              label="Path"
+              value={filePath.split("/").slice(-3).join("/")}
+              mono
+            />
+            <button
+              onClick={() =>
+                filePath &&
+                openTab(
+                  {
                     id: `file-${filePath}`,
                     title: filePath.split("/").pop() ?? label,
                     contentType: "file",
                     filePath,
-                    icon: filePath.includes("Chart.yaml") ? "⛵" : "📄",
-                  }, "center")
-                }
-                style={{
-                  background: "rgba(59,130,246,0.12)",
-                  border: "1px solid rgba(96,165,250,0.25)",
-                  borderRadius: 4,
-                  color: "#93c5fd",
-                  fontSize: 10,
-                  padding: "3px 8px",
-                  cursor: "pointer",
-                  fontFamily: "monospace",
-                }}
-              >
-                ↗ Open in Editor
-              </button>
-            </div>
+                    icon: filePath.includes("Chart.yaml")
+                      ? "helmRelease"
+                      : "fileYaml",
+                  },
+                  "center",
+                )
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "5px 10px",
+                background: "rgba(180, 190, 254, 0.08)",
+                border: "1px solid var(--border-accent)",
+                borderRadius: "var(--radius-sm)",
+                color: "var(--accent-alt)",
+                fontSize: "var(--font-size-xs)",
+                fontFamily: "var(--font-ui)",
+                cursor: "pointer",
+                transition: "var(--ease-fast)",
+                marginTop: 4,
+              }}
+              onMouseEnter={(e) =>
+                ((e.currentTarget as HTMLElement).style.background =
+                  "rgba(180, 190, 254, 0.15)")
+              }
+              onMouseLeave={(e) =>
+                ((e.currentTarget as HTMLElement).style.background =
+                  "rgba(180, 190, 254, 0.08)")
+              }
+            >
+              Open File
+            </button>
           </Section>
         )}
 
-        {/* Field metadata */}
+        {/* Field details */}
         {node && (
-          <>
-            <Section title="Field">
-              <PropRow label="Kind"      value={node.kind} />
-              <PropRow label="Type"      value={node.type_id} />
-              <PropRow label="Namespace" value={node.namespace} mono />
-              <PropRow label="Source"    value={node.source} />
-              {node.replicas != null && (
-                <PropRow label="Replicas" value={
-                  <span style={{ color: "#60a5fa", fontWeight: 600 }}>{node.replicas}</span>
-                } />
-              )}
-              {node.image && <PropRow label="Image" value={node.image} mono />}
-            </Section>
-
-            {clusterInfo && (
-              <Section title="Cluster Status">
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                  <StatusBadge status={clusterInfo.status} />
-                  <span style={{ color: "rgba(255,255,255,0.35)", fontSize: 10 }}>
-                    {clusterInfo.ready}/{clusterInfo.desired} ready
-                  </span>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                  {[
-                    { l: "Desired",   v: clusterInfo.desired },
-                    { l: "Ready",     v: clusterInfo.ready },
-                    { l: "Available", v: clusterInfo.available },
-                  ].map(({ l, v }) => (
-                    <div key={l} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 5, padding: "6px 8px", textAlign: "center" }}>
-                      <div style={{ color: "rgba(255,255,255,0.25)", fontSize: 9, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{l}</div>
-                      <div style={{ color: "#60a5fa", fontSize: 16, fontWeight: 700 }}>{v}</div>
-                    </div>
-                  ))}
-                </div>
-              </Section>
+          <Section title="Field">
+            <PropRow label="Kind" value={node.kind} mono />
+            <PropRow label="Namespace" value={node.namespace} mono />
+            {node.image && <PropRow label="Image" value={node.image} mono />}
+            {node.replicas != null && (
+              <PropRow label="Replicas" value={node.replicas} />
             )}
-          </>
-        )}
-
-        {/* Generic meta */}
-        {meta && Object.keys(meta).length > 0 && !node && (
-          <Section title="Metadata">
-            {Object.entries(meta).map(([k, v]) => (
-              <PropRow key={k} label={k} value={String(v)} mono />
-            ))}
+            <PropRow
+              label="Source"
+              value={node.source === "helm" ? "Helm" : "Raw YAML"}
+            />
           </Section>
         )}
 
-        {/* Actions */}
-        {node && (
-          <Section title="Actions">
-            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-              <ActionButton label="↻ Sync with cluster" color="rgba(34,197,94,0.2)" border="rgba(74,222,128,0.3)" text="#6ee7b7" />
-              <ActionButton label="⊞ Apply YAML" color="rgba(59,130,246,0.2)" border="rgba(96,165,250,0.3)" text="#93c5fd" />
-              <ActionButton label="⌫ Delete field" color="rgba(239,68,68,0.12)" border="rgba(239,68,68,0.25)" text="#fca5a5" />
-            </div>
+        {/* Cluster status */}
+        {clusterInfo && (
+          <Section title="Cluster">
+            <PropRow
+              label="Status"
+              value={<StatusBadge status={clusterInfo.status} />}
+            />
+            {clusterInfo.message && (
+              <PropRow label="Message" value={clusterInfo.message} mono />
+            )}
+          </Section>
+        )}
+
+        {/* File-only info */}
+        {type === "file" && !node && (
+          <Section title="File">
+            <PropRow label="Name" value={label} />
           </Section>
         )}
       </div>
@@ -227,60 +328,7 @@ export function InspectorPanel() {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <div
-        style={{
-          color: "rgba(255,255,255,0.22)",
-          fontSize: 9,
-          textTransform: "uppercase",
-          letterSpacing: "0.1em",
-          marginBottom: 8,
-          paddingBottom: 4,
-          borderBottom: "1px solid rgba(255,255,255,0.04)",
-        }}
-      >
-        {title}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function ActionButton({
-  label,
-  color,
-  border,
-  text,
-}: {
-  label: string;
-  color: string;
-  border: string;
-  text: string;
-}) {
-  return (
-    <button
-      style={{
-        width: "100%",
-        background: color,
-        border: `1px solid ${border}`,
-        borderRadius: 4,
-        color: text,
-        fontSize: 10,
-        padding: "5px 8px",
-        cursor: "pointer",
-        fontFamily: "monospace",
-        textAlign: "left",
-        transition: "filter 0.1s",
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.filter = "brightness(1.25)")}
-      onMouseLeave={(e) => (e.currentTarget.style.filter = "none")}
-    >
-      {label}
-    </button>
-  );
-}
+// ─── EmptyInspector ──────────────────────────────────────────────
 
 function EmptyInspector() {
   return (
@@ -288,18 +336,21 @@ function EmptyInspector() {
       style={{
         display: "flex",
         flexDirection: "column",
+        height: "100%",
+        background: "var(--bg-sidebar)",
         alignItems: "center",
         justifyContent: "center",
-        height: "100%",
-        gap: 8,
-        padding: 20,
-        fontFamily: "monospace",
+        color: "var(--text-faint)",
+        fontFamily: "var(--font-ui)",
+        gap: 10,
       }}
     >
-      <span style={{ fontSize: 28, opacity: 0.15 }}>◈</span>
-      <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 11, textAlign: "center" }}>
-        Select a file, field, or graph node to inspect it here
+      <span style={{ opacity: 0.25, display: "flex" }}>
+        <AppIcon name="inspector" size={22} strokeWidth={1.25} />
       </span>
+      <div style={{ fontSize: "var(--font-size-xs)", opacity: 0.5 }}>
+        Select a field to inspect
+      </div>
     </div>
   );
 }

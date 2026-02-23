@@ -505,6 +505,9 @@ fn try_parse_helm_node(component_dir: &Path) -> Option<YamlNode> {
 
 fn parse_yaml_doc(doc: &str, path: &Path, idx: usize) -> Option<YamlNode> {
     let kind = extract_yaml_field(doc, "kind")?.to_string();
+
+    // Only workloads go into the graph/nodes list
+    // Configs/Services/etc. are shown via the file tree (scan_project_files)
     let workloads = [
         "Deployment",
         "StatefulSet",
@@ -1581,7 +1584,40 @@ fn get_field_logs(
     run_kubectl(&args)
 }
 
-// ─── Existing Tauri commands ──────────────────────────────────────────────────
+// ─── Scan all project files (for Explorer file tree) ─────────────────────────
+
+/// Returns all .yaml/.yml file paths under a directory recursively,
+/// without any kind filtering — used by the Explorer file tree.
+fn scan_all_yaml_paths(dir: &Path, result: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') || name == "node_modules" || name == "vendor" {
+            continue;
+        }
+        if path.is_dir() {
+            scan_all_yaml_paths(&path, result);
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "yaml" || ext == "yml" {
+                result.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn scan_project_files(folder_path: String) -> Vec<String> {
+    let mut files = Vec::new();
+    scan_all_yaml_paths(Path::new(&folder_path), &mut files);
+    files
+}
+
+
 
 #[tauri::command]
 async fn open_folder_dialog(app: tauri::AppHandle) -> Option<String> {
@@ -1630,7 +1666,15 @@ fn scan_yaml_files(folder_path: String) -> ScanResult {
     let mut deduped: Vec<YamlNode> = Vec::new();
 
     for node in nodes {
-        let key = format!("{}::{}", node.label, node.namespace);
+        // For workloads: deduplicate by label+namespace (prefer StatefulSet over Deployment etc.)
+        // For configs/services/etc.: use kind+label+namespace so they always show separately
+        let workload_kinds = ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob", "Pod"];
+        let key = if workload_kinds.contains(&node.kind.as_str()) {
+            format!("{}::{}", node.label, node.namespace)
+        } else {
+            format!("{}::{}::{}", node.kind, node.label, node.namespace)
+        };
+
         if let Some(&existing_idx) = seen.get(&key) {
             if priority(&node.kind, &node.source)
                 < priority(&deduped[existing_idx].kind, &deduped[existing_idx].source)
@@ -1685,16 +1729,56 @@ fn delete_field_files(file_paths: Vec<String>, namespace: String) -> DeleteResul
 
     for file_path in &file_paths {
         let p = Path::new(file_path);
-        if p.exists() {
-            match run_kubectl(&["delete", "-f", file_path, "--ignore-not-found=true"]) {
-                Ok(out) => {
-                    if !out.trim().is_empty() {
-                        kubectl_out_lines.push(format!("✓ {} → {}", file_path, out.trim()));
+        if !p.exists() {
+            result.missing_files.push(file_path.clone());
+            continue;
+        }
+
+        // Step 1: kubectl delete from cluster
+        // Directories (helm component dirs or raw dirs) need --recursive
+        let kubectl_args: Vec<&str> = if p.is_dir() {
+            vec!["delete", "-f", file_path, "--recursive", "--ignore-not-found=true"]
+        } else {
+            vec!["delete", "-f", file_path, "--ignore-not-found=true"]
+        };
+
+        match run_kubectl(&kubectl_args) {
+            Ok(out) => {
+                if !out.trim().is_empty() {
+                    kubectl_out_lines.push(format!("✓ {} → {}", file_path, out.trim()));
+                }
+            }
+            Err(e) => {
+                kubectl_err_lines.push(format!("✗ {} → {}", file_path, e.trim()));
+            }
+        }
+
+        // Step 2: Delete from disk — handle both files and directories
+        let remove_result = if p.is_dir() {
+            fs::remove_dir_all(p)
+        } else {
+            fs::remove_file(p)
+        };
+
+        match remove_result {
+            Ok(_) => {
+                result.deleted_files.push(file_path.clone());
+                // For single files: clean up empty parent dir
+                if p.is_file() {
+                    if let Some(parent) = p.parent() {
+                        if parent.is_dir() {
+                            let is_empty = fs::read_dir(parent)
+                                .map(|mut d| d.next().is_none())
+                                .unwrap_or(false);
+                            if is_empty {
+                                let _ = fs::remove_dir(parent);
+                            }
+                        }
                     }
                 }
-                Err(e) => {
-                    kubectl_err_lines.push(format!("✗ {} → {}", file_path, e.trim()));
-                }
+            }
+            Err(e) => {
+                result.file_errors.push(format!("{}: {}", file_path, e));
             }
         }
     }
@@ -1704,32 +1788,6 @@ fn delete_field_files(file_paths: Vec<String>, namespace: String) -> DeleteResul
     }
     if !kubectl_err_lines.is_empty() {
         result.kubectl_error = Some(kubectl_err_lines.join("\n"));
-    }
-
-    for file_path in &file_paths {
-        let p = Path::new(file_path);
-        if !p.exists() {
-            result.missing_files.push(file_path.clone());
-            continue;
-        }
-        match fs::remove_file(p) {
-            Ok(_) => {
-                result.deleted_files.push(file_path.clone());
-                if let Some(parent) = p.parent() {
-                    if parent.is_dir() {
-                        let is_empty = fs::read_dir(parent)
-                            .map(|mut d| d.next().is_none())
-                            .unwrap_or(false);
-                        if is_empty {
-                            let _ = fs::remove_dir(parent);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                result.file_errors.push(format!("{}: {}", file_path, e));
-            }
-        }
     }
 
     let _ = namespace;
@@ -2557,6 +2615,7 @@ fn main() {
             // Project / file IO
             open_folder_dialog,
             scan_yaml_files,
+            scan_project_files,
             read_yaml_file,
             save_yaml_file,
             // Generation (new)

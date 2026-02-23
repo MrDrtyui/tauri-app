@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useIDEStore } from "../store/ideStore";
 import { DockAreaView } from "./DockAreaView";
 import { DragPreview } from "./DragPreview";
@@ -23,7 +24,6 @@ export function DockLayout() {
   const right = areas.find((a) => a.slot === "right");
   const bottom = areas.find((a) => a.slot === "bottom");
 
-  // Global mouse tracking for drag
   useEffect(() => {
     if (!dragState.isDragging) return;
     const onMove = (e: MouseEvent) => updateDragPos(e.clientX, e.clientY);
@@ -38,26 +38,35 @@ export function DockLayout() {
 
   const handleResizeLeft = useCallback(
     (delta: number) => {
-      const newSize = Math.max(MIN_LEFT, Math.min(MAX_LEFT, (left?.size ?? 260) + delta));
+      const newSize = Math.max(
+        MIN_LEFT,
+        Math.min(MAX_LEFT, (left?.size ?? 260) + delta),
+      );
       setAreaSize("left", newSize);
     },
-    [left?.size, setAreaSize]
+    [left?.size, setAreaSize],
   );
 
   const handleResizeRight = useCallback(
     (delta: number) => {
-      const newSize = Math.max(MIN_RIGHT, Math.min(MAX_RIGHT, (right?.size ?? 300) - delta));
+      const newSize = Math.max(
+        MIN_RIGHT,
+        Math.min(MAX_RIGHT, (right?.size ?? 300) - delta),
+      );
       setAreaSize("right", newSize);
     },
-    [right?.size, setAreaSize]
+    [right?.size, setAreaSize],
   );
 
   const handleResizeBottom = useCallback(
     (delta: number) => {
-      const newSize = Math.max(MIN_BOTTOM, Math.min(MAX_BOTTOM, (bottom?.size ?? 220) - delta));
+      const newSize = Math.max(
+        MIN_BOTTOM,
+        Math.min(MAX_BOTTOM, (bottom?.size ?? 220) - delta),
+      );
       setAreaSize("bottom", newSize);
     },
-    [bottom?.size, setAreaSize]
+    [bottom?.size, setAreaSize],
   );
 
   return (
@@ -68,21 +77,27 @@ export function DockLayout() {
         flexDirection: "column",
         width: "100%",
         height: "100vh",
-        background: "#0b1120",
-        fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+        background: "var(--bg-primary)",
+        fontFamily: "var(--font-ui)",
         overflow: "hidden",
         userSelect: "none",
       }}
     >
-      {/* Top bar */}
       <TitleBar />
 
-      {/* Main body */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         {/* Left panel */}
         {left?.visible && left.root && (
           <>
-            <div style={{ width: left.size, flexShrink: 0, overflow: "hidden" }}>
+            <div
+              style={{
+                width: left.size,
+                flexShrink: 0,
+                overflow: "hidden",
+                background: "var(--bg-sidebar)",
+                borderRight: "1px solid var(--border-subtle)",
+              }}
+            >
               <DockAreaView area={left} />
             </div>
             <Resizer direction="horizontal" onResize={handleResizeLeft} />
@@ -90,17 +105,30 @@ export function DockLayout() {
         )}
 
         {/* Center + Bottom */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 300 }}>
-          {/* Center */}
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            minWidth: 300,
+          }}
+        >
           <div style={{ flex: 1, overflow: "hidden" }}>
             {center && <DockAreaView area={center} />}
           </div>
 
-          {/* Bottom panel */}
           {bottom?.visible && bottom.root && (
             <>
               <Resizer direction="vertical" onResize={handleResizeBottom} />
-              <div style={{ height: bottom.size, flexShrink: 0, overflow: "hidden" }}>
+              <div
+                style={{
+                  height: bottom.size,
+                  flexShrink: 0,
+                  overflow: "hidden",
+                  borderTop: "1px solid var(--border-subtle)",
+                }}
+              >
                 <DockAreaView area={bottom} />
               </div>
             </>
@@ -111,17 +139,23 @@ export function DockLayout() {
         {right?.visible && right.root && (
           <>
             <Resizer direction="horizontal" onResize={handleResizeRight} />
-            <div style={{ width: right.size, flexShrink: 0, overflow: "hidden" }}>
+            <div
+              style={{
+                width: right.size,
+                flexShrink: 0,
+                overflow: "hidden",
+                background: "var(--bg-sidebar)",
+                borderLeft: "1px solid var(--border-subtle)",
+              }}
+            >
               <DockAreaView area={right} />
             </div>
           </>
         )}
       </div>
 
-      {/* Status bar */}
       <StatusBar />
 
-      {/* Drag preview portal */}
       {dragState.isDragging && dragState.tab && (
         <DragPreview tab={dragState.tab} x={dragState.x} y={dragState.y} />
       )}
@@ -133,102 +167,198 @@ export function DockLayout() {
 
 function ViewMenu() {
   const [open, setOpen] = React.useState(false);
+  const [menuPos, setMenuPos] = React.useState({ top: 0, left: 0 });
   const ref = React.useRef<HTMLDivElement>(null);
+  const btnRef = React.useRef<HTMLButtonElement>(null);
 
-  const areas         = useIDEStore(s => s.areas);
-  const setAreaVisible = useIDEStore(s => s.setAreaVisible);
-  const resetLayout   = useIDEStore(s => s.resetLayout);
-  const openTab       = useIDEStore(s => s.openTab);
+  const areas = useIDEStore((s) => s.areas);
+  const setAreaVisible = useIDEStore((s) => s.setAreaVisible);
+  const resetLayout = useIDEStore((s) => s.resetLayout);
+  const openTab = useIDEStore((s) => s.openTab);
 
-  const left   = areas.find(a => a.slot === "left");
-  const right  = areas.find(a => a.slot === "right");
-  const bottom = areas.find(a => a.slot === "bottom");
+  const left = areas.find((a) => a.slot === "left");
+  const right = areas.find((a) => a.slot === "right");
+  const bottom = areas.find((a) => a.slot === "bottom");
 
   React.useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (
+        ref.current &&
+        !ref.current.contains(target) &&
+        btnRef.current &&
+        !btnRef.current.contains(target)
+      )
+        setOpen(false);
     };
-    const keyHandler = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", keyHandler);
-    return () => { document.removeEventListener("mousedown", handler); document.removeEventListener("keydown", keyHandler); };
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler);
+    };
   }, [open]);
 
-  const panels: Array<{ label: string; icon: string; slot: "left" | "right" | "bottom"; visible: boolean }> = [
-    { label: "Explorer",   icon: "📁", slot: "left",   visible: left?.visible   ?? false },
-    { label: "Properties", icon: "◈",  slot: "right",  visible: right?.visible  ?? false },
-    { label: "Bottom",     icon: "⊟",  slot: "bottom", visible: bottom?.visible ?? false },
-  ];
-
-  const openPanel = (slot: "left" | "right" | "bottom", contentType: string, title: string, icon: string) => {
+  const openPanel = (
+    slot: "left" | "right" | "bottom",
+    contentType: string,
+    title: string,
+    icon: string,
+  ) => {
     setAreaVisible(slot, true);
-    openTab({ id: `tab-${contentType}`, title, contentType: contentType as never, icon }, slot);
+    openTab(
+      {
+        id: `tab-${contentType}`,
+        title,
+        contentType: contentType as never,
+        icon,
+      },
+      slot,
+    );
     setOpen(false);
   };
 
   const menuItems = [
-    { type: "toggle", label: "Explorer",     icon: "📁", slot: "left"   as const, visible: left?.visible   ?? false },
-    { type: "toggle", label: "Properties",   icon: "◈",  slot: "right"  as const, visible: right?.visible  ?? false },
+    {
+      type: "toggle",
+      label: "Explorer",
+      slot: "left" as const,
+      visible: left?.visible ?? false,
+    },
+    {
+      type: "toggle",
+      label: "Properties",
+      slot: "right" as const,
+      visible: right?.visible ?? false,
+    },
     { type: "divider" },
-    { type: "action", label: "Logs",         icon: "≡",  action: () => openPanel("bottom", "clusterLogs", "Logs", "≡") },
-    { type: "action", label: "Cluster Diff", icon: "⊞",  action: () => openPanel("bottom", "clusterDiff", "Cluster Diff", "⊞") },
+    {
+      type: "action",
+      label: "Logs",
+      action: () => openPanel("bottom", "clusterLogs", "Logs", "≡"),
+    },
+    {
+      type: "action",
+      label: "Cluster Diff",
+      action: () => openPanel("bottom", "clusterDiff", "Cluster Diff", "⊞"),
+    },
     { type: "divider" },
-    { type: "action", label: "Reset Layout", icon: "↺",  action: () => { resetLayout(); setOpen(false); } },
+    {
+      type: "action",
+      label: "Reset Layout",
+      action: () => {
+        resetLayout();
+        setOpen(false);
+      },
+    },
   ];
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          background: open ? "rgba(255,255,255,0.08)" : "none",
-          border: "none",
-          color: open ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.45)",
-          fontSize: 11, padding: "2px 8px", cursor: "pointer", borderRadius: 3,
-          fontFamily: "monospace",
+        ref={btnRef}
+        onClick={() => {
+          if (!open && btnRef.current) {
+            const r = btnRef.current.getBoundingClientRect();
+            setMenuPos({ top: r.bottom + 6, left: r.left });
+          }
+          setOpen((o) => !o);
         }}
-        onMouseEnter={e => { if (!open) e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
-        onMouseLeave={e => { if (!open) e.currentTarget.style.background = "none"; }}
+        style={{
+          background: open ? "var(--bg-elevated)" : "transparent",
+          border: "none",
+          color: open ? "var(--text-primary)" : "var(--text-subtle)",
+          fontSize: "var(--font-size-sm)",
+          padding: "3px 8px",
+          cursor: "pointer",
+          borderRadius: "var(--radius-xs)",
+          fontFamily: "var(--font-ui)",
+          transition: "var(--ease-fast)",
+        }}
+        onMouseEnter={(e) => {
+          if (!open)
+            (e.currentTarget as HTMLElement).style.background =
+              "var(--bg-elevated)";
+        }}
+        onMouseLeave={(e) => {
+          if (!open)
+            (e.currentTarget as HTMLElement).style.background = "transparent";
+        }}
       >
         View
       </button>
 
-      {open && (
-        <div style={{
-          position: "absolute", top: "calc(100% + 4px)", left: 0,
-          background: "#0f1a2e", border: "1px solid rgba(255,255,255,0.12)",
-          borderRadius: 7, padding: "4px 0", minWidth: 200,
-          boxShadow: "0 8px 32px rgba(0,0,0,0.6)", zIndex: 9999,
-          fontFamily: "'JetBrains Mono', monospace",
-        }}>
-          {menuItems.map((item, i) => {
-            if (item.type === "divider") {
-              return <div key={i} style={{ height: 1, background: "rgba(255,255,255,0.07)", margin: "3px 0" }} />;
-            }
-            if (item.type === "toggle") {
+      {open &&
+        createPortal(
+          <div
+            style={{
+              position: "fixed",
+              top: menuPos.top,
+              left: menuPos.left,
+              background: "var(--bg-modal)",
+              backdropFilter: "var(--blur-md)",
+              WebkitBackdropFilter: "var(--blur-md)",
+              border: "1px solid var(--border-default)",
+              borderRadius: "var(--radius-lg)",
+              padding: "4px 0",
+              minWidth: 200,
+              boxShadow: "var(--shadow-lg)",
+              zIndex: 9999,
+              animation: "ef-slidein 0.12s ease-out",
+            }}
+          >
+            {menuItems.map((item, i) => {
+              if (item.type === "divider") {
+                return (
+                  <div
+                    key={i}
+                    style={{
+                      height: 1,
+                      background: "var(--border-subtle)",
+                      margin: "3px 0",
+                    }}
+                  />
+                );
+              }
+              if (item.type === "toggle") {
+                return (
+                  <ViewMenuItem
+                    key={item.label}
+                    label={item.label!}
+                    checked={item.visible}
+                    onClick={() => {
+                      setAreaVisible(item.slot!, !item.visible);
+                    }}
+                  />
+                );
+              }
               return (
                 <ViewMenuItem
                   key={item.label}
-                  icon={item.icon!}
                   label={item.label!}
-                  checked={item.visible}
-                  onClick={() => { setAreaVisible(item.slot!, !item.visible); }}
+                  onClick={item.action!}
                 />
               );
-            }
-            return (
-              <ViewMenuItem key={item.label} icon={item.icon!} label={item.label!} onClick={item.action!} />
-            );
-          })}
-        </div>
-      )}
+            })}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
 
-function ViewMenuItem({ icon, label, checked, onClick }: {
-  icon: string; label: string; checked?: boolean; onClick: () => void;
+function ViewMenuItem({
+  label,
+  checked,
+  onClick,
+}: {
+  label: string;
+  checked?: boolean;
+  onClick: () => void;
 }) {
   const [hov, setHov] = React.useState(false);
   return (
@@ -237,18 +367,29 @@ function ViewMenuItem({ icon, label, checked, onClick }: {
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
-        display: "flex", alignItems: "center", gap: 8,
-        padding: "5px 12px 5px 10px", cursor: "pointer",
-        background: hov ? "rgba(59,130,246,0.1)" : "transparent",
-        color: hov ? "#e2e8f0" : "rgba(255,255,255,0.65)",
-        fontSize: 11, transition: "all 0.08s",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "5px 14px 5px 10px",
+        cursor: "pointer",
+        background: hov ? "var(--bg-sidebar-active)" : "transparent",
+        color: hov ? "var(--text-primary)" : "var(--text-secondary)",
+        fontSize: "var(--font-size-sm)",
+        transition: "var(--ease-fast)",
+        borderRadius: "var(--radius-xs)",
+        margin: "1px 4px",
       }}
     >
-      {/* checkmark column */}
-      <span style={{ width: 12, fontSize: 10, color: "rgba(96,165,250,0.8)", flexShrink: 0 }}>
-        {checked === true ? "✓" : checked === false ? "" : ""}
+      <span
+        style={{
+          width: 14,
+          fontSize: 10,
+          color: "var(--accent)",
+          flexShrink: 0,
+        }}
+      >
+        {checked === true ? "✓" : ""}
       </span>
-      <span style={{ width: 14, fontSize: 12, flexShrink: 0, textAlign: "center" }}>{icon}</span>
       <span style={{ flex: 1 }}>{label}</span>
     </div>
   );
@@ -262,60 +403,100 @@ function TitleBar() {
   return (
     <div
       style={{
-        height: 36,
-        background: "#060d1a",
-        borderBottom: "1px solid rgba(59,130,246,0.15)",
+        height: 38,
+        background: "var(--bg-toolbar)",
+        backdropFilter: "var(--blur-md)",
+        WebkitBackdropFilter: "var(--blur-md)",
+        borderBottom: "1px solid var(--border-subtle)",
         display: "flex",
         alignItems: "center",
-        padding: "0 12px",
-        gap: 8,
+        padding: "0 14px",
+        gap: 10,
         flexShrink: 0,
+        /* macOS traffic lights spacing */
+        paddingLeft: 78,
       }}
     >
-      {/* Logo + close project */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      {/* Logo */}
+      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <div
           onClick={closeProject}
           title="Back to start"
           style={{
-            width: 18, height: 18, borderRadius: 4,
-            background: "linear-gradient(135deg, #60a5fa, #2563eb)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: 8, color: "white", fontWeight: 700,
-            cursor: "pointer", flexShrink: 0,
-            transition: "opacity 0.12s",
+            width: 16,
+            height: 16,
+            borderRadius: "var(--radius-xs)",
+            background:
+              "linear-gradient(135deg, var(--ctp-mauve), var(--ctp-lavender))",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 7,
+            color: "var(--ctp-crust)",
+            fontWeight: 700,
+            cursor: "pointer",
+            flexShrink: 0,
+            transition: "var(--ease-fast)",
+            userSelect: "none",
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.7")}
-          onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
+          onMouseEnter={(e) =>
+            ((e.currentTarget as HTMLElement).style.opacity = "0.7")
+          }
+          onMouseLeave={(e) =>
+            ((e.currentTarget as HTMLElement).style.opacity = "1")
+          }
         >
           E
         </div>
-        <span style={{ color: "#e2e8f0", fontSize: 11, fontWeight: 600, letterSpacing: "0.1em" }}>
-          ENDFIELD
-        </span>
-        <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 11 }}>·</span>
-        <span style={{ color: "rgba(96,165,250,0.7)", fontSize: 11, fontFamily: "monospace" }}>
-          {projectName}
-        </span>
         <span
           style={{
-            color: "rgba(96,165,250,0.5)",
-            fontSize: 9,
-            padding: "1px 5px",
-            border: "1px solid rgba(96,165,250,0.2)",
-            borderRadius: 3,
+            color: "var(--text-secondary)",
+            fontSize: "var(--font-size-sm)",
+            fontWeight: 500,
+            letterSpacing: "0.08em",
+            userSelect: "none",
           }}
         >
-          MVP
+          ENDFIELD
         </span>
       </div>
 
+      {/* Separator */}
+      <span style={{ color: "var(--border-strong)", fontSize: 12 }}>·</span>
+
+      {/* Project name */}
+      <span
+        style={{
+          color: "var(--text-muted)",
+          fontSize: "var(--font-size-sm)",
+          fontFamily: "var(--font-mono)",
+          letterSpacing: "0.01em",
+        }}
+      >
+        {projectName}
+      </span>
+
       {/* Menu bar */}
-      <div style={{ display: "flex", gap: 2, marginLeft: 8 }}>
+      <div style={{ display: "flex", gap: 2, marginLeft: 12 }}>
         <ViewMenu />
       </div>
 
       <div style={{ flex: 1 }} />
+
+      {/* Version badge */}
+      <span
+        style={{
+          color: "var(--text-faint)",
+          fontSize: 9,
+          padding: "2px 6px",
+          border: "1px solid var(--border-subtle)",
+          borderRadius: "var(--radius-full)",
+          fontFamily: "var(--font-mono)",
+          letterSpacing: "0.05em",
+        }}
+      >
+        alpha
+      </span>
     </div>
   );
 }
@@ -328,38 +509,98 @@ function StatusBar() {
   const clusterStatus = useIDEStore((s) => s.clusterStatus);
   const nodes = useIDEStore((s) => s.nodes);
 
-  const allGreen = clusterStatus?.fields.every(f => f.status === "green");
-  const hasProblem = clusterStatus?.fields.some(f => f.status === "red");
-  const dotColor = !clusterStatus ? "#475569" : hasProblem ? "#ef4444" : allGreen ? "#22c55e" : "#eab308";
-  const dotLabel = !clusterStatus ? "no kubectl" : hasProblem ? "degraded" : allGreen ? "healthy" : "partial";
+  const allGreen = clusterStatus?.fields.every((f) => f.status === "green");
+  const hasProblem = clusterStatus?.fields.some((f) => f.status === "red");
+
+  const dotColor = !clusterStatus
+    ? "var(--status-unknown)"
+    : hasProblem
+      ? "var(--status-error)"
+      : allGreen
+        ? "var(--status-ok)"
+        : "var(--status-warn)";
+
+  const dotLabel = !clusterStatus
+    ? "no kubectl"
+    : hasProblem
+      ? "degraded"
+      : allGreen
+        ? "healthy"
+        : "partial";
 
   return (
     <div
       style={{
         height: 22,
-        background: "#060d1a",
-        borderTop: "1px solid rgba(59,130,246,0.1)",
+        background: "var(--bg-statusbar)",
+        borderTop: "1px solid var(--border-subtle)",
         display: "flex",
         alignItems: "center",
-        padding: "0 12px",
-        gap: 12,
+        padding: "0 14px",
+        gap: 14,
         flexShrink: 0,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        <div style={{ width: 6, height: 6, borderRadius: "50%", background: dotColor, boxShadow: dotColor !== "#475569" ? `0 0 6px ${dotColor}` : "none" }} />
-        <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 10 }}>{dotLabel}</span>
+      {/* Cluster status */}
+      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+        <span
+          style={{
+            display: "inline-block",
+            width: 5,
+            height: 5,
+            borderRadius: "50%",
+            background: dotColor,
+            flexShrink: 0,
+          }}
+        />
+        <span
+          style={{
+            color: "var(--text-faint)",
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+          }}
+        >
+          {dotLabel}
+        </span>
       </div>
+
       {nodes.length > 0 && (
-        <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 10 }}>{nodes.length} fields</span>
+        <span
+          style={{
+            color: "var(--text-faint)",
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+          }}
+        >
+          {nodes.length} {nodes.length === 1 ? "field" : "fields"}
+        </span>
       )}
+
       {selectedEntity && (
-        <span style={{ color: "rgba(96,165,250,0.6)", fontSize: 10 }}>
+        <span
+          style={{
+            color: "var(--text-subtle)",
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+          }}
+        >
           {selectedEntity.type}: {selectedEntity.label}
         </span>
       )}
+
       <div style={{ flex: 1 }} />
-      <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 10, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+
+      <span
+        style={{
+          color: "var(--text-faint)",
+          fontSize: 10,
+          fontFamily: "var(--font-mono)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          maxWidth: 360,
+        }}
+      >
         {projectPath ?? "Endfield IDE"}
       </span>
     </div>

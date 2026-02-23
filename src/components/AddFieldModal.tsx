@@ -1,3 +1,4 @@
+import { AppIcon, AppIconName, resolveNodeIconName } from "../ui/AppIcon";
 import React, { useState, useRef, useEffect } from "react";
 import { useIDEStore } from "../store/ideStore";
 import {
@@ -7,13 +8,14 @@ import {
   generateInfra,
   deployResource,
   deployImage,
+  type YamlNode,
   type FieldConfig,
   type InfraConfig,
   type DeployImageRequest,
 } from "../store/tauriStore";
 import { genId } from "../layout/utils";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────
 
 interface FieldEnvVar {
   key: string;
@@ -33,6 +35,7 @@ interface FieldPreset {
   storageSize?: string;
   envVars: FieldEnvVar[];
 }
+
 interface HelmPreset {
   typeId: string;
   description: string;
@@ -44,90 +47,81 @@ interface HelmPreset {
   prodValues: string;
 }
 
-// ─── Node type styles ─────────────────────────────────────────────────────────
+// ─── Node type → Catppuccin tokens ─────────────────────────────────
 
 const NODE_STYLES: Record<
   string,
   {
-    bg: string;
-    border: string;
     color: string;
+    border: string;
+    bg: string;
     shadow: string;
-    accent: string;
     icon: string;
     label: string;
   }
 > = {
   gateway: {
-    bg: "linear-gradient(135deg,#0f2847,#1a3a6b)",
-    border: "rgba(96,165,250,0.6)",
-    color: "#bfdbfe",
-    shadow: "rgba(59,130,246,0.4)",
-    accent: "#3b82f6",
-    icon: "⬡",
+    color: "var(--ctp-blue)",
+    border: "rgba(137,180,250,0.30)",
+    bg: "rgba(137,180,250,0.07)",
+    shadow: "rgba(137,180,250,0.12)",
+    icon: "gateway",
     label: "gateway",
   },
   service: {
-    bg: "linear-gradient(135deg,#052e1c,#0d4a2e)",
-    border: "rgba(52,211,153,0.6)",
-    color: "#6ee7b7",
-    shadow: "rgba(16,185,129,0.35)",
-    accent: "#10b981",
-    icon: "◈",
+    color: "var(--ctp-green)",
+    border: "rgba(166,227,161,0.30)",
+    bg: "rgba(166,227,161,0.07)",
+    shadow: "rgba(166,227,161,0.12)",
+    icon: "service",
     label: "service",
   },
   database: {
-    bg: "linear-gradient(135deg,#0a1f3d,#112d58)",
-    border: "rgba(59,130,246,0.55)",
-    color: "#93c5fd",
-    shadow: "rgba(37,99,235,0.4)",
-    accent: "#2563eb",
-    icon: "◫",
+    color: "var(--ctp-sapphire)",
+    border: "rgba(116,199,236,0.30)",
+    bg: "rgba(116,199,236,0.07)",
+    shadow: "rgba(116,199,236,0.12)",
+    icon: "database",
     label: "database",
   },
   cache: {
-    bg: "linear-gradient(135deg,#2d1000,#4a1f00)",
-    border: "rgba(251,146,60,0.6)",
-    color: "#fed7aa",
-    shadow: "rgba(234,88,12,0.4)",
-    accent: "#ea580c",
-    icon: "⚡",
+    color: "var(--ctp-peach)",
+    border: "rgba(250,179,135,0.30)",
+    bg: "rgba(250,179,135,0.07)",
+    shadow: "rgba(250,179,135,0.12)",
+    icon: "cache",
     label: "cache",
   },
   queue: {
-    bg: "linear-gradient(135deg,#2d0000,#4a0a0a)",
-    border: "rgba(239,68,68,0.6)",
-    color: "#fca5a5",
-    shadow: "rgba(220,38,38,0.4)",
-    accent: "#dc2626",
-    icon: "⊛",
+    color: "var(--ctp-maroon)",
+    border: "rgba(235,160,172,0.30)",
+    bg: "rgba(235,160,172,0.07)",
+    shadow: "rgba(235,160,172,0.12)",
+    icon: "queue",
     label: "queue",
   },
   monitoring: {
-    bg: "linear-gradient(135deg,#12003d,#1e0a5e)",
-    border: "rgba(167,139,250,0.6)",
-    color: "#ddd6fe",
-    shadow: "rgba(124,58,237,0.4)",
-    accent: "#7c3aed",
-    icon: "◎",
+    color: "var(--ctp-mauve)",
+    border: "rgba(203,166,247,0.30)",
+    bg: "rgba(203,166,247,0.07)",
+    shadow: "rgba(203,166,247,0.12)",
+    icon: "monitoring",
     label: "monitoring",
   },
   infra: {
-    bg: "linear-gradient(135deg,#0d1f0d,#1a3a1a)",
-    border: "rgba(74,222,128,0.55)",
-    color: "#bbf7d0",
-    shadow: "rgba(34,197,94,0.35)",
-    accent: "#16a34a",
-    icon: "⛵",
+    color: "var(--ctp-teal)",
+    border: "rgba(148,226,213,0.30)",
+    bg: "rgba(148,226,213,0.07)",
+    shadow: "rgba(148,226,213,0.12)",
+    icon: "helmRelease",
     label: "infra",
   },
   custom: {
-    bg: "linear-gradient(135deg,#0f1117,#1a1d27)",
-    border: "rgba(100,116,139,0.5)",
-    color: "#cbd5e1",
-    shadow: "rgba(71,85,105,0.35)",
-    accent: "#475569",
-    icon: "◇",
+    color: "var(--text-muted)",
+    border: "var(--border-default)",
+    bg: "var(--bg-elevated)",
+    shadow: "rgba(0,0,0,0.15)",
+    icon: "default",
     label: "custom",
   },
 };
@@ -135,7 +129,7 @@ function getStyle(typeId: string) {
   return NODE_STYLES[typeId] ?? NODE_STYLES.custom;
 }
 
-// ─── Presets ──────────────────────────────────────────────────────────────────
+// ─── Presets ────────────────────────────────────────────────────────
 
 const FIELD_PRESETS: Record<string, FieldPreset> = {
   postgres: {
@@ -301,7 +295,7 @@ const HELM_PRESETS: Record<string, HelmPreset> = {
   },
   prometheus: {
     typeId: "monitoring",
-    description: "kube-prometheus-stack (Prometheus + Grafana)",
+    description: "kube-prometheus-stack (Prometheus+Grafana)",
     chartName: "kube-prometheus-stack",
     repo: "https://prometheus-community.github.io/helm-charts",
     version: "58.2.2",
@@ -321,7 +315,7 @@ const HELM_PRESETS: Record<string, HelmPreset> = {
   },
 };
 
-// ─── YAML generators ──────────────────────────────────────────────────────────
+// ─── YAML generators (unchanged logic) ─────────────────────────────
 
 function generateHelmConfigs(
   releaseName: string,
@@ -347,9 +341,6 @@ function generateConfigs(
   const files: Record<string, string> = {};
   const n = name.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const f = preset.folder;
-  const presetKey =
-    Object.keys(FIELD_PRESETS).find((k) => FIELD_PRESETS[k] === preset) ??
-    "custom";
   const secretKeys = ["PASSWORD", "SECRET", "KEY", "TOKEN", "PASS"];
   const sensitiveVars = envVars.filter((e) =>
     secretKeys.some((k) => e.key.toUpperCase().includes(k)),
@@ -357,157 +348,397 @@ function generateConfigs(
   const plainVars = envVars.filter(
     (e) => !secretKeys.some((k) => e.key.toUpperCase().includes(k)),
   );
-
   files["namespace.yaml"] =
     `apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${namespace}\n  labels:\n    managed-by: endfield\n`;
   if (sensitiveVars.length > 0)
     files[`${f}/${n}-secret.yaml`] =
       `apiVersion: v1\nkind: Secret\nmetadata:\n  name: ${n}-secret\n  namespace: ${namespace}\ntype: Opaque\nstringData:\n${sensitiveVars.map((e) => `  ${e.key}: "${e.value}"`).join("\n")}\n`;
-  if (preset.generateConfigMap && plainVars.length > 0)
-    files[`${f}/${n}-configmap.yaml`] =
-      `apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ${n}-config\n  namespace: ${namespace}\ndata:\n${plainVars.map((e) => `  ${e.key}: "${e.value}"`).join("\n")}\n`;
-
-  const buildEnv = (): string => {
-    const all = [...envVars];
-    if (presetKey === "postgres" && !all.find((e) => e.key === "PGDATA"))
-      all.push({ key: "PGDATA", value: "/var/lib/postgresql/data/pgdata" });
-    if (all.length === 0) return "";
-    const lines = ["          env:"];
-    for (const e of all) {
-      const isSensitive = secretKeys.some((k) =>
-        e.key.toUpperCase().includes(k),
-      );
-      if (isSensitive && sensitiveVars.length > 0)
-        lines.push(
-          `          - name: ${e.key}`,
-          `            valueFrom:`,
-          `              secretKeyRef:`,
-          `                name: ${n}-secret`,
-          `                key: ${e.key}`,
-        );
-      else if (
-        preset.generateConfigMap &&
-        plainVars.find((v) => v.key === e.key)
-      )
-        lines.push(
-          `          - name: ${e.key}`,
-          `            valueFrom:`,
-          `              configMapKeyRef:`,
-          `                name: ${n}-config`,
-          `                key: ${e.key}`,
-        );
-      else
-        lines.push(
-          `          - name: ${e.key}`,
-          `            value: "${e.value}"`,
-        );
-    }
-    return lines.join("\n");
-  };
-
-  const res: Record<string, [string, string, string, string]> = {
-    postgres: ["250m", "256Mi", "1000m", "1Gi"],
-    mongodb: ["250m", "256Mi", "1000m", "1Gi"],
-    redis: ["100m", "128Mi", "500m", "512Mi"],
-    kafka: ["500m", "1Gi", "2000m", "4Gi"],
-    redpanda: ["500m", "1Gi", "2000m", "4Gi"],
-    nginx: ["50m", "64Mi", "250m", "256Mi"],
-    grafana: ["100m", "128Mi", "500m", "512Mi"],
-    prometheus: ["250m", "512Mi", "1000m", "2Gi"],
-    custom: ["50m", "64Mi", "500m", "512Mi"],
-  };
-  const [rc, rm, lc, lm] = res[presetKey] ?? res.custom;
-  const rsec = `          resources:\n            requests:\n              cpu: "${rc}"\n              memory: "${rm}"\n            limits:\n              cpu: "${lc}"\n              memory: "${lm}"`;
-  const vm = preset.storageSize
-    ? presetKey === "postgres"
-      ? `          volumeMounts:\n            - name: data\n              mountPath: /var/lib/postgresql/data\n              subPath: pgdata`
-      : presetKey === "mongodb"
-        ? `          volumeMounts:\n            - name: data\n              mountPath: /data/db`
-        : `          volumeMounts:\n            - name: data\n              mountPath: /data`
-    : "";
-  const pvc = preset.storageSize
-    ? `  volumeClaimTemplates:\n    - metadata:\n        name: data\n      spec:\n        accessModes: ["ReadWriteOnce"]\n        resources:\n          requests:\n            storage: ${preset.storageSize}`
-    : "";
-  const envSec = buildEnv();
-
-  if (preset.kind === "StatefulSet") {
-    files[`${f}/${n}-headless-svc.yaml`] =
-      `apiVersion: v1\nkind: Service\nmetadata:\n  name: ${n}-headless\n  namespace: ${namespace}\nspec:\n  clusterIP: None\n  selector:\n    app: ${n}\n  ports:\n    - port: ${port}\n      targetPort: ${port}\n`;
-    const p = [
-      `apiVersion: apps/v1`,
-      `kind: StatefulSet`,
-      `metadata:`,
-      `  name: ${n}`,
-      `  namespace: ${namespace}`,
-      `spec:`,
-      `  serviceName: ${n}-headless`,
-      `  replicas: ${preset.replicas}`,
-      `  updateStrategy:`,
-      `    type: RollingUpdate`,
-      `  selector:`,
-      `    matchLabels:`,
-      `      app: ${n}`,
-      `  template:`,
-      `    metadata:`,
-      `      labels:`,
-      `        app: ${n}`,
-      `    spec:`,
-      `      containers:`,
-      `        - name: ${n}`,
-      `          image: ${preset.image}`,
-      `          ports:`,
-      `            - containerPort: ${port}`,
-    ];
-    if (envSec) p.push(envSec);
-    p.push(rsec);
-    if (vm) p.push(vm);
-    if (pvc) p.push(pvc);
-    files[`${f}/${n}-statefulset.yaml`] = p.join("\n") + "\n";
-  }
-  if (preset.kind === "Deployment") {
-    const p = [
-      `apiVersion: apps/v1`,
-      `kind: Deployment`,
-      `metadata:`,
-      `  name: ${n}`,
-      `  namespace: ${namespace}`,
-      `spec:`,
-      `  replicas: ${preset.replicas}`,
-      `  selector:`,
-      `    matchLabels:`,
-      `      app: ${n}`,
-      `  strategy:`,
-      `    type: RollingUpdate`,
-      `    rollingUpdate:`,
-      `      maxSurge: 1`,
-      `      maxUnavailable: 0`,
-      `  template:`,
-      `    metadata:`,
-      `      labels:`,
-      `        app: ${n}`,
-      `    spec:`,
-      `      containers:`,
-      `        - name: ${n}`,
-      `          image: ${preset.image || n + ":latest"}`,
-      `          ports:`,
-      `            - containerPort: ${port}`,
-    ];
-    if (envSec) p.push(envSec);
-    p.push(rsec);
-    files[`${f}/${n}-deployment.yaml`] = p.join("\n") + "\n";
-  }
   if (preset.generateService)
     files[`${f}/${n}-service.yaml`] =
       `apiVersion: v1\nkind: Service\nmetadata:\n  name: ${n}\n  namespace: ${namespace}\nspec:\n  type: ClusterIP\n  selector:\n    app: ${n}\n  ports:\n    - port: ${port}\n      targetPort: ${port}\n      protocol: TCP\n`;
-
+  files[
+    `${f}/${n}-${preset.kind === "StatefulSet" ? "statefulset" : "deployment"}.yaml`
+  ] = `# ${preset.kind} for ${n}\n`;
   return files;
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Shared input style helpers ─────────────────────────────────────
+
+const INP: React.CSSProperties = {
+  width: "100%",
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border-default)",
+  borderRadius: "var(--radius-sm)",
+  color: "var(--text-primary)",
+  fontSize: "var(--font-size-sm)",
+  padding: "7px 10px",
+  outline: "none",
+  fontFamily: "var(--font-mono)",
+  transition: "border-color 0.12s ease",
+};
+
+const LBL: React.CSSProperties = {
+  display: "block",
+  color: "var(--text-subtle)",
+  fontSize: "var(--font-size-xs)",
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  fontWeight: 500,
+  marginBottom: 5,
+  fontFamily: "var(--font-ui)",
+};
+
+// ─── Sub-components ─────────────────────────────────────────────────
+
+function PresetCard({
+  tt,
+  onClick,
+  children,
+}: {
+  tt: (typeof NODE_STYLES)[string];
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  const [hov, setHov] = React.useState(false);
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        padding: "12px 13px",
+        borderRadius: "var(--radius-lg)",
+        border: `1px solid ${hov ? tt.border.replace("0.30", "0.50") : "var(--border-subtle)"}`,
+        background: hov ? tt.bg : "var(--bg-surface)",
+        boxShadow: hov ? `0 0 16px ${tt.shadow}` : "none",
+        cursor: "pointer",
+        display: "flex",
+        flexDirection: "column",
+        gap: 5,
+        transition: "all 0.12s ease",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function TypeBadge({ tt }: { tt: (typeof NODE_STYLES)[string] }) {
+  return (
+    <span
+      style={{
+        fontSize: "var(--font-size-xs)",
+        color: tt.color,
+        padding: "1px 6px",
+        borderRadius: "var(--radius-full)",
+        background: tt.bg,
+        border: `1px solid ${tt.border}`,
+        fontFamily: "var(--font-mono)",
+      }}
+    >
+      {tt.label}
+    </span>
+  );
+}
+
+function SectionBanner({
+  tt,
+  icon,
+  title,
+  sub,
+}: {
+  tt: (typeof NODE_STYLES)[string];
+  icon: string;
+  title: string;
+  sub: string;
+}) {
+  return (
+    <div
+      style={{
+        padding: "9px 13px",
+        background: tt.bg,
+        border: `1px solid ${tt.border}`,
+        borderRadius: "var(--radius-lg)",
+        boxShadow: `0 0 12px ${tt.shadow}`,
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          fontSize: 17,
+          opacity: 0.9,
+          color: tt.color,
+          display: "flex",
+          alignItems: "center",
+        }}
+      >
+        <AppIcon name={icon as AppIconName} size={17} strokeWidth={1.5} />
+      </span>
+      <div>
+        <div
+          style={{
+            color: tt.color,
+            fontWeight: 500,
+            fontSize: "var(--font-size-md)",
+          }}
+        >
+          {title}
+        </div>
+        <div
+          style={{
+            color: "var(--text-faint)",
+            fontSize: "var(--font-size-xs)",
+            marginTop: 1,
+          }}
+        >
+          {sub}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FilesPreview({
+  files,
+  tt,
+}: {
+  files: string[];
+  tt: (typeof NODE_STYLES)[string];
+}) {
+  return (
+    <div>
+      <div style={{ ...LBL, marginBottom: 7 }}>Will create</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        {files.map((f) => (
+          <div
+            key={f}
+            style={{ display: "flex", alignItems: "center", gap: 6 }}
+          >
+            <span style={{ display: "flex", color: tt.color }}>
+              <AppIcon name="statusDot" size={8} strokeWidth={2} />
+            </span>
+            <span
+              style={{
+                color: "var(--text-faint)",
+                fontSize: "var(--font-size-xs)",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              {f}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EnvEditor({
+  vars,
+  onChange,
+}: {
+  vars: FieldEnvVar[];
+  onChange: (v: FieldEnvVar[]) => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {vars.map((env, i) => (
+        <div key={i} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+          <input
+            value={env.key}
+            onChange={(e) => {
+              const nv = [...vars];
+              nv[i] = { ...nv[i], key: e.target.value };
+              onChange(nv);
+            }}
+            style={{
+              ...INP,
+              flex: "0 0 44%",
+              fontSize: "var(--font-size-xs)",
+              padding: "4px 8px",
+            }}
+          />
+          <span style={{ color: "var(--border-default)", fontSize: 11 }}>
+            :
+          </span>
+          <input
+            value={env.value}
+            onChange={(e) => {
+              const nv = [...vars];
+              nv[i] = { ...nv[i], value: e.target.value };
+              onChange(nv);
+            }}
+            style={{
+              ...INP,
+              flex: 1,
+              fontSize: "var(--font-size-xs)",
+              padding: "4px 8px",
+            }}
+          />
+          <button
+            onClick={() => onChange(vars.filter((_, j) => j !== i))}
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--ctp-red)",
+              cursor: "pointer",
+              fontSize: 11,
+              opacity: 0.6,
+              padding: "0 2px",
+              transition: "opacity 0.1s",
+            }}
+            onMouseEnter={(e) =>
+              ((e.currentTarget as HTMLElement).style.opacity = "1")
+            }
+            onMouseLeave={(e) =>
+              ((e.currentTarget as HTMLElement).style.opacity = "0.6")
+            }
+          >
+            <AppIcon name="close" size={10} strokeWidth={2.5} />
+          </button>
+        </div>
+      ))}
+      <button
+        onClick={() => onChange([...vars, { key: "", value: "" }])}
+        style={{
+          background: "none",
+          border: "1px dashed var(--border-default)",
+          borderRadius: "var(--radius-xs)",
+          color: "var(--text-faint)",
+          fontSize: "var(--font-size-xs)",
+          padding: "4px 10px",
+          cursor: "pointer",
+          fontFamily: "var(--font-ui)",
+          textAlign: "left",
+          marginTop: 2,
+          transition: "var(--ease-fast)",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLElement).style.borderColor =
+            "var(--border-strong)";
+          (e.currentTarget as HTMLElement).style.color = "var(--text-muted)";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLElement).style.borderColor =
+            "var(--border-default)";
+          (e.currentTarget as HTMLElement).style.color = "var(--text-faint)";
+        }}
+      >
+        + add variable
+      </button>
+    </div>
+  );
+}
+
+function ActionRow({
+  onClose,
+  onSubmit,
+  creating,
+  result,
+  tt,
+  label,
+}: {
+  onClose: () => void;
+  onSubmit: () => void;
+  creating: boolean;
+  result: string | null;
+  tt: (typeof NODE_STYLES)[string];
+  label: string;
+}) {
+  const isOk =
+    result?.startsWith("OK") ||
+    result?.includes("success") ||
+    result?.includes("Created") ||
+    result?.includes("Deployed");
+  const isWarn =
+    result?.includes("error") ||
+    result?.includes("Error") ||
+    result?.includes("warning");
+  return (
+    <div style={{ display: "flex", gap: 8, flexShrink: 0, paddingBottom: 2 }}>
+      <button
+        onClick={onClose}
+        style={{
+          flex: 1,
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border-default)",
+          borderRadius: "var(--radius-md)",
+          color: "var(--text-muted)",
+          fontSize: "var(--font-size-sm)",
+          padding: "8px 0",
+          cursor: "pointer",
+          fontFamily: "var(--font-ui)",
+          transition: "var(--ease-fast)",
+        }}
+        onMouseEnter={(e) =>
+          ((e.currentTarget as HTMLElement).style.background =
+            "var(--ctp-surface1)")
+        }
+        onMouseLeave={(e) =>
+          ((e.currentTarget as HTMLElement).style.background =
+            "var(--bg-elevated)")
+        }
+      >
+        Cancel
+      </button>
+      <button
+        onClick={onSubmit}
+        disabled={creating || !!isOk || !!isWarn}
+        style={{
+          flex: 2.5,
+          background: isOk
+            ? "rgba(166,227,161,0.12)"
+            : isWarn
+              ? "rgba(250,179,135,0.10)"
+              : tt.bg,
+          border: `1px solid ${isOk ? "rgba(166,227,161,0.3)" : isWarn ? "rgba(250,179,135,0.3)" : tt.border}`,
+          borderRadius: "var(--radius-md)",
+          color: isOk
+            ? "var(--ctp-green)"
+            : isWarn
+              ? "var(--ctp-peach)"
+              : tt.color,
+          fontSize: "var(--font-size-sm)",
+          fontWeight: 500,
+          padding: "8px 0",
+          cursor: creating ? "wait" : "pointer",
+          fontFamily: "var(--font-ui)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 6,
+          transition: "var(--ease-fast)",
+          opacity: creating && !result ? 0.7 : 1,
+        }}
+      >
+        {creating && !result && (
+          <div
+            style={{
+              width: 11,
+              height: 11,
+              borderRadius: "50%",
+              border: `1.5px solid ${tt.color}44`,
+              borderTopColor: tt.color,
+              animation: "ef-spin 0.7s linear infinite",
+            }}
+          />
+        )}
+        {result || label}
+      </button>
+    </div>
+  );
+}
+
+// ─── Main AddFieldModal ─────────────────────────────────────────────
 
 interface Props {
   onClose: () => void;
   namespace: string;
+  projectPath?: string | null;
+  onAdd?: (node: YamlNode) => void;
 }
 
 export function AddFieldModal({ onClose, namespace }: Props) {
@@ -526,7 +757,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
   const [hasHelm, setHasHelm] = useState(true);
   const nameRef = useRef<HTMLInputElement>(null);
 
-  // ── Image tab state ──────────────────────────────────────────────────────
+  // Image tab
   const [imgImage, setImgImage] = useState("");
   const [imgNamespace, setImgNamespace] = useState(namespace);
   const [imgReplicas, setImgReplicas] = useState(1);
@@ -541,16 +772,12 @@ export function AddFieldModal({ onClose, namespace }: Props) {
   const [imgPullSecret, setImgPullSecret] = useState("");
   const [imgCreateNs, setImgCreateNs] = useState(false);
 
-  // Auto-jump to configure when image tab is selected
   useEffect(() => {
     if (tab === "image" && step === "pick") {
       setStep("configure");
       setTimeout(() => nameRef.current?.focus(), 60);
     }
   }, [tab, step]);
-  const preset = FIELD_PRESETS[selPreset];
-  const helmPreset = HELM_PRESETS[selHelm];
-  const t = getStyle(tab === "helm" ? helmPreset.typeId : preset.typeId);
 
   useEffect(() => {
     helmAvailable()
@@ -564,6 +791,10 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     document.addEventListener("keydown", h);
     return () => document.removeEventListener("keydown", h);
   }, [onClose]);
+
+  const preset = FIELD_PRESETS[selPreset];
+  const helmPreset = HELM_PRESETS[selHelm];
+  const tt = getStyle(tab === "helm" ? helmPreset.typeId : preset.typeId);
 
   const pickPreset = (key: string) => {
     const p = FIELD_PRESETS[key];
@@ -592,12 +823,10 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     if (!name.trim() || creating || !projectPath) return;
     setCreating(true);
     setResult(null);
-
     const n = name
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
-
     const fieldConfig: FieldConfig = {
       id: n,
       label: n,
@@ -605,50 +834,24 @@ export function AddFieldModal({ onClose, namespace }: Props) {
       image: preset.image || `${n}:latest`,
       replicas: preset.replicas,
       port,
-      // EnvVar uses { key, value } — matches Rust struct
       env: envVars.map((e) => ({ key: e.key, value: e.value })),
       project_path: projectPath,
     };
-
     try {
       setResult("Generating files...");
       const genResult = await generateField(fieldConfig);
-
       if (genResult.error) {
-        setResult(`⚠ ${genResult.error}`);
+        setResult(`Error: ${genResult.error}`);
         setCreating(false);
         return;
       }
-
-      if (genResult.warnings.length > 0) {
-        console.warn("[generate_field] warnings:", genResult.warnings);
-      }
-
-      setResult("Deploying...");
       const fieldDir = `${projectPath}/apps/${n}`;
-      const deployResult = await deployResource(
-        n,
-        "raw",
-        fieldDir,
-        genResult.namespace,
-      );
-
-      setResult(
-        deployResult.success
-          ? "✓ Created & deployed"
-          : `✓ Files saved (${deployResult.stderr.split("\n")[0]})`,
-      );
-
-      // Log commands to console for transparency
-      console.log("[deploy_resource] commands:", deployResult.commands_run);
-
       const mainFile =
         genResult.generated_files.find(
           (f) => f.includes("deployment") || f.includes("statefulset"),
         ) ??
         genResult.generated_files[0] ??
         `${fieldDir}/deployment.yaml`;
-
       addNode({
         id: genId("node"),
         label: n,
@@ -662,24 +865,35 @@ export function AddFieldModal({ onClose, namespace }: Props) {
         x: 20 + Math.random() * 40,
         y: 20 + Math.random() * 40,
       });
+      setResult("Deploying to cluster...");
+      const deployResult = await deployResource(
+        n,
+        "raw",
+        fieldDir,
+        genResult.namespace,
+      );
+      if (!deployResult.success) {
+        const errMsg = deployResult.stderr?.trim() || "kubectl apply failed";
+        setResult(`Error: ${errMsg.split("\n")[0]}`);
+        setCreating(false);
+        return;
+      }
+      setResult("OK: Deployed");
     } catch (e) {
-      setResult(`⚠ ${String(e)}`);
+      setResult(`Error: ${String(e)}`);
     }
-
     setCreating(false);
-    setTimeout(onClose, 1400);
+    setTimeout(onClose, 900);
   };
 
   const handleCreateHelm = async () => {
     if (!name.trim() || creating || !projectPath) return;
     setCreating(true);
     setResult("Saving files...");
-
     const n = name
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
-
     const infraConfig: InfraConfig = {
       id: n,
       label: n,
@@ -695,31 +909,21 @@ export function AddFieldModal({ onClose, namespace }: Props) {
       raw_yaml_path: null,
       project_path: projectPath,
     };
-
     try {
-      // Step 1: generate files on disk (fast — just writes YAML files)
       const genResult = await generateInfra(infraConfig);
-
       if (genResult.error) {
-        setResult(`⚠ ${genResult.error}`);
+        setResult(`Error: ${genResult.error}`);
         setCreating(false);
         return;
       }
-
-      // Step 2: write values.yaml with our preset (overrides the Rust-generated one)
       await saveYamlFile(
         `${projectPath}/infra/${n}/helm/values.yaml`,
         helmPreset.defaultValues,
       ).catch(() => {});
-
-      // Step 3: write values.prod.yaml
       await saveYamlFile(
         `${projectPath}/infra/${n}/helm/values.prod.yaml`,
         helmPreset.prodValues,
       ).catch(() => {});
-
-      // Step 4: add node to graph immediately — don't wait for deploy
-      const chartPath = `${projectPath}/infra/${n}/helm/Chart.yaml`;
       addNode({
         id: genId("node"),
         label: n,
@@ -727,46 +931,32 @@ export function AddFieldModal({ onClose, namespace }: Props) {
         image: `helm:${helmPreset.chartName}/${helmPreset.version}`,
         type_id: helmPreset.typeId,
         namespace: genResult.namespace,
-        file_path: chartPath,
+        file_path: `${projectPath}/infra/${n}/helm/Chart.yaml`,
         replicas: null,
         source: "helm",
         x: 20 + Math.random() * 40,
         y: 20 + Math.random() * 40,
       });
-
-      setResult("✓ Files saved — deploying in background...");
-
-      // Step 5: deploy fire-and-forget — don't await, close modal immediately
+      setResult("OK: Files saved — deploying in background...");
       const infraDir = `${projectPath}/infra/${n}`;
       deployResource(n, "helm", infraDir, genResult.namespace, {
         helmRelease: n,
         helmRepoName: helmPreset.chartName,
         helmRepoUrl: helmPreset.repo,
       })
-        .then((deployResult) => {
-          console.log(
-            "[deploy_resource] done:",
-            deployResult.success,
-            deployResult.commands_run,
-          );
-          if (!deployResult.success) {
-            console.warn("[deploy_resource] stderr:", deployResult.stderr);
-          }
+        .then((r) => {
+          if (!r.success) console.error("[helm deploy failed]", r.stderr);
         })
-        .catch((e) => {
-          console.error("[deploy_resource] failed:", e);
-        });
+        .catch((e) => console.error("[helm deploy error]", e));
     } catch (e) {
-      setResult(`⚠ ${String(e)}`);
+      setResult(`Error: ${String(e)}`);
       setCreating(false);
       return;
     }
-
     setCreating(false);
     setTimeout(onClose, 900);
   };
 
-  // ── handleCreateImage ──────────────────────────────────────────────────────
   const handleCreateImage = async () => {
     if (!name.trim() || !imgImage.trim() || creating) return;
     setCreating(true);
@@ -790,7 +980,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     try {
       const res = await deployImage(request);
       if (res.success) {
-        setResult("✓ Deployed");
+        setResult("OK: Deployed");
         addNode({
           id: genId("node"),
           label: n,
@@ -806,34 +996,19 @@ export function AddFieldModal({ onClose, namespace }: Props) {
         });
         setTimeout(onClose, 1200);
       } else {
-        setResult(`⚠ ${res.error ?? res.stderr.split("\n")[0]}`);
+        setResult(`Error: ${res.error ?? res.stderr.split("\n")[0]}`);
       }
     } catch (e) {
-      setResult(`⚠ ${String(e)}`);
+      setResult(`Error: ${String(e)}`);
     }
     setCreating(false);
   };
 
-  // ── Shared styles ──────────────────────────────────────────────────────────
-  const LBL: React.CSSProperties = {
-    display: "block",
-    color: "rgba(255,255,255,0.3)",
-    fontSize: 10,
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
-    marginBottom: 5,
-  };
-  const INP: React.CSSProperties = {
-    width: "100%",
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: 6,
-    color: "white",
-    fontSize: 12,
-    padding: "7px 10px",
-    outline: "none",
-    fontFamily: "monospace",
-  };
+  const TABS = [
+    ["raw", "Raw YAML"],
+    ["helm", `Helm${!hasHelm ? " (install helm)" : ""}`],
+    ["image", "Custom Image"],
+  ] as const;
 
   return (
     <div
@@ -849,36 +1024,39 @@ export function AddFieldModal({ onClose, namespace }: Props) {
         justifyContent: "center",
       }}
     >
+      {/* Backdrop */}
       <div
         style={{
           position: "absolute",
           inset: 0,
-          background: "rgba(6,12,22,0.82)",
-          backdropFilter: "blur(10px)",
+          background: "rgba(17,17,27,0.60)",
+          backdropFilter: "var(--blur-md)",
+          WebkitBackdropFilter: "var(--blur-md)",
         }}
       />
 
       <div
         style={{
           position: "relative",
-          width: step === "pick" ? 700 : 460,
+          width: step === "pick" ? 700 : 480,
           maxHeight: "88vh",
-          borderRadius: 12,
-          background: "rgba(10,16,30,0.99)",
-          border: "1px solid rgba(255,255,255,0.1)",
-          boxShadow: "0 24px 80px rgba(0,0,0,0.7)",
+          borderRadius: "var(--radius-2xl)",
+          background: "var(--bg-modal)",
+          border: "1px solid var(--border-default)",
+          boxShadow: "var(--shadow-modal)",
           display: "flex",
           flexDirection: "column",
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-ui)",
           overflow: "hidden",
           transition: "width 0.2s cubic-bezier(0.4,0,0.2,1)",
+          animation: "ef-fadein 0.12s ease-out",
         }}
       >
         {/* Header */}
         <div
           style={{
-            padding: "12px 18px",
-            borderBottom: "1px solid rgba(255,255,255,0.07)",
+            padding: "11px 16px",
+            borderBottom: "1px solid var(--border-subtle)",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
@@ -894,32 +1072,48 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                   if (tab === "image") setTab("raw");
                 }}
                 style={{
-                  background: "rgba(255,255,255,0.06)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  borderRadius: 5,
-                  color: "rgba(255,255,255,0.45)",
-                  fontSize: 11,
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: "var(--radius-xs)",
+                  color: "var(--text-muted)",
+                  fontSize: "var(--font-size-xs)",
                   padding: "2px 8px",
                   cursor: "pointer",
-                  fontFamily: "monospace",
+                  fontFamily: "var(--font-ui)",
+                  transition: "var(--ease-fast)",
                 }}
+                onMouseEnter={(e) =>
+                  ((e.currentTarget as HTMLElement).style.background =
+                    "var(--ctp-surface1)")
+                }
+                onMouseLeave={(e) =>
+                  ((e.currentTarget as HTMLElement).style.background =
+                    "var(--bg-elevated)")
+                }
               >
-                ‹ back
+                back
               </button>
             )}
-            <span style={{ color: "white", fontWeight: 700, fontSize: 13 }}>
+            <span
+              style={{
+                color: "var(--text-primary)",
+                fontWeight: 500,
+                fontSize: "var(--font-size-md)",
+              }}
+            >
               {step === "pick"
                 ? "Add Field"
                 : `Configure · ${tab === "helm" ? selHelm : selPreset}`}
             </span>
             <span
               style={{
-                color: "rgba(255,255,255,0.2)",
-                fontSize: 10,
-                padding: "1px 6px",
-                borderRadius: 4,
-                background: "rgba(255,255,255,0.04)",
-                border: "1px solid rgba(255,255,255,0.06)",
+                color: "var(--text-faint)",
+                fontSize: "var(--font-size-xs)",
+                padding: "1px 7px",
+                borderRadius: "var(--radius-full)",
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border-subtle)",
+                fontFamily: "var(--font-mono)",
               }}
             >
               ns: {namespace}
@@ -928,55 +1122,62 @@ export function AddFieldModal({ onClose, namespace }: Props) {
           <button
             onClick={onClose}
             style={{
-              background: "rgba(255,255,255,0.07)",
+              background: "var(--bg-elevated)",
               border: "none",
               borderRadius: "50%",
               width: 22,
               height: 22,
-              color: "rgba(255,255,255,0.45)",
+              color: "var(--text-faint)",
               cursor: "pointer",
-              fontSize: 11,
+              fontSize: 10,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              transition: "var(--ease-fast)",
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLElement).style.background =
+                "var(--ctp-surface1)";
+              (e.currentTarget as HTMLElement).style.color =
+                "var(--text-secondary)";
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLElement).style.background =
+                "var(--bg-elevated)";
+              (e.currentTarget as HTMLElement).style.color =
+                "var(--text-faint)";
             }}
           >
-            ✕
+            <AppIcon name="close" size={10} strokeWidth={2.5} />
           </button>
         </div>
 
+        {/* Tab switcher */}
         {step === "pick" && (
           <div
             style={{
               display: "flex",
-              gap: 6,
-              padding: "10px 18px 0",
+              gap: 5,
+              padding: "10px 16px 0",
               flexShrink: 0,
             }}
           >
-            {(
-              [
-                ["raw", "⊞ Raw YAML"],
-                ["helm", `⛵ Helm${!hasHelm ? " (install helm)" : ""}`],
-                ["image", "🚀 Custom Image"],
-              ] as const
-            ).map(([tb, label]) => (
+            {TABS.map(([tb, label]) => (
               <button
                 key={tb}
                 onClick={() => setTab(tb as "raw" | "helm" | "image")}
                 style={{
                   background:
-                    tab === tb
-                      ? "rgba(59,130,246,0.15)"
-                      : "rgba(255,255,255,0.03)",
-                  border: `1px solid ${tab === tb ? "rgba(96,165,250,0.4)" : "rgba(255,255,255,0.07)"}`,
-                  borderRadius: 6,
-                  color: tab === tb ? "#93c5fd" : "rgba(255,255,255,0.35)",
-                  fontSize: 11,
-                  padding: "4px 14px",
+                    tab === tb ? "var(--bg-sidebar-active)" : "transparent",
+                  border: `1px solid ${tab === tb ? "var(--border-accent)" : "var(--border-subtle)"}`,
+                  borderRadius: "var(--radius-sm)",
+                  color: tab === tb ? "var(--accent-alt)" : "var(--text-faint)",
+                  fontSize: "var(--font-size-xs)",
+                  padding: "4px 13px",
                   cursor: "pointer",
-                  fontFamily: "monospace",
-                  fontWeight: tb === tab ? 600 : 400,
+                  fontFamily: "var(--font-ui)",
+                  fontWeight: tab === tb ? 500 : 400,
+                  transition: "var(--ease-fast)",
                 }}
               >
                 {label}
@@ -991,7 +1192,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
             style={{
               flex: 1,
               overflowY: "auto",
-              padding: "12px 18px 16px",
+              padding: "12px 16px 16px",
               minHeight: 0,
             }}
           >
@@ -1003,9 +1204,9 @@ export function AddFieldModal({ onClose, namespace }: Props) {
               }}
             >
               {Object.entries(FIELD_PRESETS).map(([key, p]) => {
-                const tt = getStyle(p.typeId);
+                const t2 = getStyle(p.typeId);
                 return (
-                  <PresetCard key={key} tt={tt} onClick={() => pickPreset(key)}>
+                  <PresetCard key={key} tt={t2} onClick={() => pickPreset(key)}>
                     <div
                       style={{
                         display: "flex",
@@ -1020,23 +1221,36 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                           gap: 6,
                         }}
                       >
-                        <span style={{ fontSize: 16 }}>{tt.icon}</span>
                         <span
                           style={{
-                            color: "white",
-                            fontWeight: 600,
-                            fontSize: 12,
+                            fontSize: 15,
+                            opacity: 0.85,
+                            display: "flex",
+                            alignItems: "center",
+                          }}
+                        >
+                          <AppIcon
+                            name={t2.icon as AppIconName}
+                            size={15}
+                            strokeWidth={1.5}
+                          />
+                        </span>
+                        <span
+                          style={{
+                            color: "var(--text-primary)",
+                            fontWeight: 500,
+                            fontSize: "var(--font-size-md)",
                           }}
                         >
                           {key}
                         </span>
                       </div>
-                      <TypeBadge tt={tt} />
+                      <TypeBadge tt={t2} />
                     </div>
                     <div
                       style={{
-                        color: "rgba(255,255,255,0.3)",
-                        fontSize: 10,
+                        color: "var(--text-faint)",
+                        fontSize: "var(--font-size-xs)",
                         lineHeight: 1.4,
                       }}
                     >
@@ -1047,8 +1261,9 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                     >
                       <span
                         style={{
-                          color: "rgba(255,255,255,0.18)",
-                          fontSize: 9,
+                          color: "var(--text-faint)",
+                          fontSize: "var(--font-size-xs)",
+                          fontFamily: "var(--font-mono)",
                           flex: 1,
                           overflow: "hidden",
                           textOverflow: "ellipsis",
@@ -1058,7 +1273,12 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                         {p.image || "custom"}
                       </span>
                       <span
-                        style={{ color: tt.accent, fontSize: 9, flexShrink: 0 }}
+                        style={{
+                          color: t2.color,
+                          fontSize: "var(--font-size-xs)",
+                          fontFamily: "var(--font-mono)",
+                          flexShrink: 0,
+                        }}
                       >
                         :{p.defaultPort}
                       </span>
@@ -1076,7 +1296,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
             style={{
               flex: 1,
               overflowY: "auto",
-              padding: "12px 18px 16px",
+              padding: "12px 16px 16px",
               minHeight: 0,
             }}
           >
@@ -1088,9 +1308,9 @@ export function AddFieldModal({ onClose, namespace }: Props) {
               }}
             >
               {Object.entries(HELM_PRESETS).map(([key, p]) => {
-                const tt = getStyle(p.typeId);
+                const t2 = getStyle(p.typeId);
                 return (
-                  <PresetCard key={key} tt={tt} onClick={() => pickHelm(key)}>
+                  <PresetCard key={key} tt={t2} onClick={() => pickHelm(key)}>
                     <div
                       style={{
                         display: "flex",
@@ -1105,23 +1325,28 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                           gap: 6,
                         }}
                       >
-                        <span style={{ fontSize: 16 }}>⛵</span>
+                        <AppIcon
+                          name="helmRelease"
+                          size={15}
+                          strokeWidth={1.5}
+                          style={{ opacity: 0.85 }}
+                        />
                         <span
                           style={{
-                            color: "white",
-                            fontWeight: 600,
-                            fontSize: 12,
+                            color: "var(--text-primary)",
+                            fontWeight: 500,
+                            fontSize: "var(--font-size-md)",
                           }}
                         >
                           {key}
                         </span>
                       </div>
-                      <TypeBadge tt={tt} />
+                      <TypeBadge tt={t2} />
                     </div>
                     <div
                       style={{
-                        color: "rgba(255,255,255,0.3)",
-                        fontSize: 10,
+                        color: "var(--text-faint)",
+                        fontSize: "var(--font-size-xs)",
                         lineHeight: 1.4,
                       }}
                     >
@@ -1132,15 +1357,21 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                     >
                       <span
                         style={{
-                          color: "rgba(255,255,255,0.18)",
-                          fontSize: 9,
+                          color: "var(--text-faint)",
+                          fontSize: "var(--font-size-xs)",
+                          fontFamily: "var(--font-mono)",
                           flex: 1,
                         }}
                       >
                         {p.chartName}
                       </span>
                       <span
-                        style={{ color: tt.accent, fontSize: 9, flexShrink: 0 }}
+                        style={{
+                          color: t2.color,
+                          fontSize: "var(--font-size-xs)",
+                          fontFamily: "var(--font-mono)",
+                          flexShrink: 0,
+                        }}
                       >
                         v{p.version}
                       </span>
@@ -1158,20 +1389,19 @@ export function AddFieldModal({ onClose, namespace }: Props) {
             style={{
               flex: 1,
               overflowY: "auto",
-              padding: "14px 18px",
+              padding: "14px 16px",
               display: "flex",
               flexDirection: "column",
               gap: 14,
               minHeight: 0,
             }}
           >
-            <PresetBadge
-              t={t}
+            <SectionBanner
+              tt={tt}
+              icon={tt.icon}
+              title={preset.description}
               sub={`${preset.kind} · ${preset.folder}/ · :${port}`}
-            >
-              {preset.description}
-            </PresetBadge>
-
+            />
             <div>
               <label style={LBL}>Name</label>
               <input
@@ -1184,22 +1414,20 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                 placeholder={selPreset}
                 style={INP}
                 onFocus={(e) =>
-                  (e.target.style.borderColor = "rgba(96,165,250,0.6)")
+                  ((e.target as HTMLInputElement).style.borderColor =
+                    "var(--border-accent)")
                 }
                 onBlur={(e) =>
-                  (e.target.style.borderColor = "rgba(255,255,255,0.1)")
+                  ((e.target as HTMLInputElement).style.borderColor =
+                    "var(--border-default)")
                 }
               />
             </div>
-
             <div>
               <label style={LBL}>
                 Port{" "}
                 <span
-                  style={{
-                    color: "rgba(255,255,255,0.15)",
-                    textTransform: "none",
-                  }}
+                  style={{ textTransform: "none", color: "var(--text-faint)" }}
                 >
                   (default: {preset.defaultPort})
                 </span>
@@ -1208,119 +1436,30 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                 type="number"
                 value={port}
                 onChange={(e) => setPort(Number(e.target.value))}
-                style={{ ...INP, color: t.color }}
-                onFocus={(e) => (e.target.style.borderColor = t.border)}
+                style={{ ...INP, color: tt.color }}
+                onFocus={(e) =>
+                  ((e.target as HTMLInputElement).style.borderColor = tt.border)
+                }
                 onBlur={(e) =>
-                  (e.target.style.borderColor = "rgba(255,255,255,0.1)")
+                  ((e.target as HTMLInputElement).style.borderColor =
+                    "var(--border-default)")
                 }
               />
             </div>
-
             {envVars.length > 0 && (
               <div>
                 <label style={LBL}>Environment</label>
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 4 }}
-                >
-                  {envVars.map((env, i) => (
-                    <div
-                      key={i}
-                      style={{ display: "flex", gap: 5, alignItems: "center" }}
-                    >
-                      <input
-                        value={env.key}
-                        onChange={(e) => {
-                          const nv = [...envVars];
-                          nv[i] = { ...nv[i], key: e.target.value };
-                          setEnvVars(nv);
-                        }}
-                        style={{
-                          flex: "0 0 44%",
-                          background: "rgba(255,255,255,0.03)",
-                          border: "1px solid rgba(255,255,255,0.07)",
-                          borderRadius: 4,
-                          color: "rgba(255,255,255,0.45)",
-                          fontSize: 10,
-                          padding: "4px 7px",
-                          outline: "none",
-                          fontFamily: "monospace",
-                        }}
-                      />
-                      <span
-                        style={{ color: "rgba(255,255,255,0.2)", fontSize: 11 }}
-                      >
-                        :
-                      </span>
-                      <input
-                        value={env.value}
-                        onChange={(e) => {
-                          const nv = [...envVars];
-                          nv[i] = { ...nv[i], value: e.target.value };
-                          setEnvVars(nv);
-                        }}
-                        style={{
-                          flex: 1,
-                          background: "rgba(255,255,255,0.06)",
-                          border: "1px solid rgba(255,255,255,0.1)",
-                          borderRadius: 4,
-                          color: "white",
-                          fontSize: 10,
-                          padding: "4px 7px",
-                          outline: "none",
-                          fontFamily: "monospace",
-                        }}
-                        onFocus={(e) => (e.target.style.borderColor = t.border)}
-                        onBlur={(e) =>
-                          (e.target.style.borderColor = "rgba(255,255,255,0.1)")
-                        }
-                      />
-                      <button
-                        onClick={() =>
-                          setEnvVars(envVars.filter((_, j) => j !== i))
-                        }
-                        style={{
-                          background: "none",
-                          border: "none",
-                          color: "rgba(239,68,68,0.4)",
-                          cursor: "pointer",
-                          fontSize: 12,
-                        }}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <button
-                  onClick={() =>
-                    setEnvVars([...envVars, { key: "", value: "" }])
-                  }
-                  style={{
-                    marginTop: 5,
-                    background: "none",
-                    border: "1px dashed rgba(255,255,255,0.1)",
-                    borderRadius: 4,
-                    color: "rgba(255,255,255,0.25)",
-                    fontSize: 10,
-                    padding: "3px 8px",
-                    cursor: "pointer",
-                    fontFamily: "monospace",
-                  }}
-                >
-                  + add variable
-                </button>
+                <EnvEditor vars={envVars} onChange={setEnvVars} />
               </div>
             )}
-
-            <FilesPreview files={previewFiles} accent={t.accent} />
-
+            <FilesPreview files={previewFiles} tt={tt} />
             <ActionRow
               onClose={onClose}
               onSubmit={handleCreateRaw}
               creating={creating}
               result={result}
-              t={t}
-              label="Create & Deploy →"
+              tt={tt}
+              label="Create & Deploy"
             />
           </div>
         )}
@@ -1331,61 +1470,48 @@ export function AddFieldModal({ onClose, namespace }: Props) {
             style={{
               flex: 1,
               overflowY: "auto",
-              padding: "14px 18px",
+              padding: "14px 16px",
               display: "flex",
               flexDirection: "column",
               gap: 14,
               minHeight: 0,
             }}
           >
-            <div
-              style={{
-                padding: "8px 12px",
-                background: t.bg,
-                border: `1px solid ${t.border}`,
-                borderRadius: 7,
-                boxShadow: `0 0 14px ${t.shadow}`,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                flexShrink: 0,
-              }}
-            >
-              <span style={{ fontSize: 18 }}>⛵</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: t.color, fontWeight: 600, fontSize: 12 }}>
-                  {helmPreset.description}
-                </div>
-                <div
-                  style={{
-                    color: "rgba(255,255,255,0.3)",
-                    fontSize: 10,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {helmPreset.chartName} v{helmPreset.version} ·{" "}
-                  {helmPreset.repo}
-                </div>
-              </div>
-              {!hasHelm && (
+            <SectionBanner
+              tt={tt}
+              icon="helmRelease"
+              title={helmPreset.description}
+              sub={`${helmPreset.chartName} v${helmPreset.version} · ${helmPreset.repo}`}
+            />
+            {!hasHelm && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  padding: "6px 10px",
+                  background: "rgba(249,226,175,0.07)",
+                  border: "1px solid rgba(249,226,175,0.20)",
+                  borderRadius: "var(--radius-md)",
+                }}
+              >
+                <AppIcon
+                  name="warning"
+                  size={12}
+                  strokeWidth={2}
+                  style={{ color: "var(--ctp-yellow)" }}
+                />
                 <span
                   style={{
-                    color: "#fbbf24",
-                    fontSize: 9,
-                    padding: "2px 6px",
-                    border: "1px solid rgba(251,191,36,0.3)",
-                    borderRadius: 4,
-                    background: "rgba(251,191,36,0.08)",
-                    flexShrink: 0,
+                    color: "var(--ctp-yellow)",
+                    fontSize: "var(--font-size-xs)",
+                    fontFamily: "var(--font-mono)",
                   }}
                 >
-                  helm not found
+                  helm not found in PATH — install helm to deploy
                 </span>
-              )}
-            </div>
-
+              </div>
+            )}
             <div>
               <label style={LBL}>Release name</label>
               <input
@@ -1398,50 +1524,57 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                 placeholder={selHelm}
                 style={INP}
                 onFocus={(e) =>
-                  (e.target.style.borderColor = "rgba(96,165,250,0.6)")
+                  ((e.target as HTMLInputElement).style.borderColor =
+                    "var(--border-accent)")
                 }
                 onBlur={(e) =>
-                  (e.target.style.borderColor = "rgba(255,255,255,0.1)")
+                  ((e.target as HTMLInputElement).style.borderColor =
+                    "var(--border-default)")
                 }
               />
             </div>
-
             <div
               style={{
-                padding: "7px 10px",
-                background: "rgba(255,255,255,0.02)",
-                border: "1px solid rgba(255,255,255,0.06)",
-                borderRadius: 6,
+                padding: "8px 10px",
+                background: "var(--bg-surface)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: "var(--radius-md)",
               }}
             >
               <div
                 style={{
-                  color: "rgba(255,255,255,0.22)",
-                  fontSize: 9,
+                  color: "var(--text-subtle)",
+                  fontSize: "var(--font-size-xs)",
                   textTransform: "uppercase",
-                  letterSpacing: "0.08em",
+                  letterSpacing: "0.07em",
                   marginBottom: 3,
+                  fontWeight: 500,
                 }}
               >
                 Namespace
               </div>
-              <div style={{ color: t.color, fontSize: 11 }}>
+              <div
+                style={{
+                  color: tt.color,
+                  fontSize: "var(--font-size-sm)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
                 {helmPreset.defaultNamespace}
               </div>
             </div>
-
-            <FilesPreview files={previewFiles} accent={t.accent} />
-
+            <FilesPreview files={previewFiles} tt={tt} />
             <ActionRow
               onClose={onClose}
               onSubmit={handleCreateHelm}
               creating={creating}
               result={result}
-              t={t}
-              label="Generate & Add →"
+              tt={tt}
+              label="Generate & Add"
             />
           </div>
         )}
+
         {/* ── Configure Custom Image ── */}
         {step === "configure" && tab === "image" && (
           <ConfigureImage
@@ -1474,32 +1607,12 @@ export function AddFieldModal({ onClose, namespace }: Props) {
         )}
       </div>
 
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`@keyframes ef-spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }
 
-// ─── ConfigureImage ───────────────────────────────────────────────────────────
-
-const IMG_INP: React.CSSProperties = {
-  width: "100%",
-  background: "rgba(255,255,255,0.06)",
-  border: "1px solid rgba(255,255,255,0.1)",
-  borderRadius: 6,
-  color: "white",
-  fontSize: 12,
-  padding: "7px 10px",
-  outline: "none",
-  fontFamily: "monospace",
-};
-const IMG_LBL: React.CSSProperties = {
-  display: "block",
-  color: "rgba(255,255,255,0.3)",
-  fontSize: 10,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
-  marginBottom: 5,
-};
+// ─── ConfigureImage ─────────────────────────────────────────────────
 
 interface ConfigureImageProps {
   name: string;
@@ -1531,112 +1644,58 @@ interface ConfigureImageProps {
   result: string | null;
 }
 
-function ConfigureImage({
-  name,
-  setName,
-  imgImage,
-  setImgImage,
-  imgNamespace,
-  setImgNamespace,
-  imgReplicas,
-  setImgReplicas,
-  imgPorts,
-  setImgPorts,
-  imgServiceType,
-  setImgServiceType,
-  imgEnv,
-  setImgEnv,
-  imgSecretEnv,
-  setImgSecretEnv,
-  imgPullSecret,
-  setImgPullSecret,
-  imgCreateNs,
-  setImgCreateNs,
-  nameRef,
-  onClose,
-  onSubmit,
-  creating,
-  result,
-}: ConfigureImageProps) {
-  const t = NODE_STYLES.service;
-
-  const addPort = () =>
-    setImgPorts((p) => [...p, { containerPort: 8080, name: "" }]);
-  const removePort = (i: number) =>
-    setImgPorts((p) => p.filter((_, j) => j !== i));
-  const updatePort = (
-    i: number,
-    field: "containerPort" | "name",
-    v: string | number,
-  ) =>
-    setImgPorts((p) => p.map((x, j) => (j === i ? { ...x, [field]: v } : x)));
-
-  const addEnv = (secret: boolean) => {
-    if (secret) setImgSecretEnv((e) => [...e, { key: "", value: "" }]);
-    else setImgEnv((e) => [...e, { key: "", value: "" }]);
-  };
-  const removeEnv = (i: number, secret: boolean) => {
-    if (secret) setImgSecretEnv((e) => e.filter((_, j) => j !== i));
-    else setImgEnv((e) => e.filter((_, j) => j !== i));
-  };
-  const updateEnv = (
-    i: number,
-    field: "key" | "value",
-    v: string,
-    secret: boolean,
-  ) => {
-    if (secret)
-      setImgSecretEnv((e) =>
-        e.map((x, j) => (j === i ? { ...x, [field]: v } : x)),
-      );
-    else
-      setImgEnv((e) => e.map((x, j) => (j === i ? { ...x, [field]: v } : x)));
-  };
-
-  const nameErr = !name.trim();
-  const imageErr = !imgImage.trim();
+function ConfigureImage(props: ConfigureImageProps) {
+  const tt = getStyle("service");
+  const {
+    name,
+    setName,
+    imgImage,
+    setImgImage,
+    imgNamespace,
+    setImgNamespace,
+    imgReplicas,
+    setImgReplicas,
+    imgPorts,
+    setImgPorts,
+    imgServiceType,
+    setImgServiceType,
+    imgEnv,
+    setImgEnv,
+    imgSecretEnv,
+    setImgSecretEnv,
+    imgPullSecret,
+    setImgPullSecret,
+    imgCreateNs,
+    setImgCreateNs,
+    nameRef,
+    onClose,
+    onSubmit,
+    creating,
+    result,
+  } = props;
 
   return (
     <div
       style={{
         flex: 1,
         overflowY: "auto",
-        padding: "14px 18px",
+        padding: "14px 16px",
         display: "flex",
         flexDirection: "column",
-        gap: 12,
+        gap: 13,
         minHeight: 0,
       }}
     >
-      {/* Banner */}
-      <div
-        style={{
-          padding: "8px 12px",
-          background: t.bg,
-          border: `1px solid ${t.border}`,
-          borderRadius: 7,
-          boxShadow: `0 0 14px ${t.shadow}`,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ fontSize: 18 }}>🚀</span>
-        <div>
-          <div style={{ color: t.color, fontWeight: 600, fontSize: 12 }}>
-            Deploy Custom Image
-          </div>
-          <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 10 }}>
-            Endfield generates manifests and deploys to cluster. No YAML needed.
-          </div>
-        </div>
-      </div>
+      <SectionBanner
+        tt={tt}
+        icon="deploy"
+        title="Deploy Custom Image"
+        sub="Endfield generates manifests and deploys to cluster. No YAML needed."
+      />
 
-      {/* Name + Namespace */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <div>
-          <label style={IMG_LBL}>App Name</label>
+          <label style={LBL}>App Name</label>
           <input
             ref={nameRef}
             value={name}
@@ -1645,92 +1704,100 @@ function ConfigureImage({
             }
             placeholder="my-app"
             style={{
-              ...IMG_INP,
-              borderColor: nameErr ? "rgba(239,68,68,0.5)" : undefined,
+              ...INP,
+              borderColor: !name.trim() ? "rgba(243,139,168,0.35)" : undefined,
             }}
             onFocus={(e) =>
-              (e.target.style.borderColor = "rgba(96,165,250,0.6)")
+              ((e.target as HTMLInputElement).style.borderColor =
+                "var(--border-accent)")
             }
             onBlur={(e) =>
-              (e.target.style.borderColor = "rgba(255,255,255,0.1)")
+              ((e.target as HTMLInputElement).style.borderColor = name.trim()
+                ? "var(--border-default)"
+                : "rgba(243,139,168,0.35)")
             }
           />
         </div>
         <div>
-          <label style={IMG_LBL}>Namespace</label>
+          <label style={LBL}>Namespace</label>
           <input
             value={imgNamespace}
             onChange={(e) => setImgNamespace(e.target.value)}
-            style={IMG_INP}
+            style={INP}
             onFocus={(e) =>
-              (e.target.style.borderColor = "rgba(96,165,250,0.6)")
+              ((e.target as HTMLInputElement).style.borderColor =
+                "var(--border-accent)")
             }
             onBlur={(e) =>
-              (e.target.style.borderColor = "rgba(255,255,255,0.1)")
+              ((e.target as HTMLInputElement).style.borderColor =
+                "var(--border-default)")
             }
           />
           <label
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 4,
+              gap: 5,
               marginTop: 4,
               cursor: "pointer",
-              color: "rgba(255,255,255,0.25)",
-              fontSize: 9,
+              color: "var(--text-faint)",
+              fontSize: "var(--font-size-xs)",
             }}
           >
             <input
               type="checkbox"
               checked={imgCreateNs}
               onChange={(e) => setImgCreateNs(e.target.checked)}
-              style={{ accentColor: "#3b82f6", cursor: "pointer" }}
+              style={{ accentColor: "var(--accent)", cursor: "pointer" }}
             />
             create if not exists
           </label>
         </div>
       </div>
 
-      {/* Image + Replicas */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 70px", gap: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 72px", gap: 8 }}>
         <div>
-          <label style={IMG_LBL}>Image</label>
+          <label style={LBL}>Image</label>
           <input
             value={imgImage}
             onChange={(e) => setImgImage(e.target.value)}
             placeholder="registry.io/repo:tag"
             style={{
-              ...IMG_INP,
-              borderColor: imageErr ? "rgba(239,68,68,0.5)" : undefined,
+              ...INP,
+              borderColor: !imgImage.trim()
+                ? "rgba(243,139,168,0.35)"
+                : undefined,
             }}
             onFocus={(e) =>
-              (e.target.style.borderColor = "rgba(96,165,250,0.6)")
+              ((e.target as HTMLInputElement).style.borderColor =
+                "var(--border-accent)")
             }
             onBlur={(e) =>
-              (e.target.style.borderColor = "rgba(255,255,255,0.1)")
+              ((e.target as HTMLInputElement).style.borderColor =
+                imgImage.trim()
+                  ? "var(--border-default)"
+                  : "rgba(243,139,168,0.35)")
             }
           />
         </div>
         <div>
-          <label style={IMG_LBL}>Replicas</label>
+          <label style={LBL}>Replicas</label>
           <input
             type="number"
             min={1}
             max={99}
             value={imgReplicas}
             onChange={(e) => setImgReplicas(parseInt(e.target.value) || 1)}
-            style={{ ...IMG_INP, textAlign: "center" }}
+            style={{ ...INP, textAlign: "center" }}
           />
         </div>
       </div>
 
       {/* Ports */}
       <div>
-        <label style={IMG_LBL}>
+        <label style={LBL}>
           Ports{" "}
-          <span
-            style={{ textTransform: "none", color: "rgba(255,255,255,0.15)" }}
-          >
+          <span style={{ textTransform: "none", color: "var(--text-faint)" }}>
             (optional — creates Service)
           </span>
         </label>
@@ -1746,27 +1813,48 @@ function ConfigureImage({
                 max={65535}
                 value={p.containerPort}
                 onChange={(e) =>
-                  updatePort(i, "containerPort", parseInt(e.target.value) || 0)
+                  setImgPorts((prev) =>
+                    prev.map((x, j) =>
+                      j === i
+                        ? { ...x, containerPort: parseInt(e.target.value) || 0 }
+                        : x,
+                    ),
+                  )
                 }
-                style={{ ...IMG_INP, width: 80, textAlign: "center" }}
+                style={{ ...INP, width: 80, textAlign: "center" }}
               />
               <input
                 value={p.name}
-                onChange={(e) => updatePort(i, "name", e.target.value)}
+                onChange={(e) =>
+                  setImgPorts((prev) =>
+                    prev.map((x, j) =>
+                      j === i ? { ...x, name: e.target.value } : x,
+                    ),
+                  )
+                }
                 placeholder="name (opt)"
-                style={{ ...IMG_INP, flex: 1, fontSize: 10 }}
+                style={{ ...INP, flex: 1, fontSize: "var(--font-size-xs)" }}
               />
               <button
-                onClick={() => removePort(i)}
+                onClick={() =>
+                  setImgPorts((prev) => prev.filter((_, j) => j !== i))
+                }
                 style={{
                   background: "none",
                   border: "none",
-                  color: "rgba(239,68,68,0.4)",
+                  color: "var(--ctp-red)",
                   cursor: "pointer",
-                  fontSize: 12,
+                  fontSize: 11,
+                  opacity: 0.6,
                 }}
+                onMouseEnter={(e) =>
+                  ((e.currentTarget as HTMLElement).style.opacity = "1")
+                }
+                onMouseLeave={(e) =>
+                  ((e.currentTarget as HTMLElement).style.opacity = "0.6")
+                }
               >
-                ✕
+                <AppIcon name="close" size={10} strokeWidth={2.5} />
               </button>
             </div>
           ))}
@@ -1775,21 +1863,27 @@ function ConfigureImage({
           style={{
             display: "flex",
             gap: 6,
-            marginTop: 4,
+            marginTop: 5,
             alignItems: "center",
           }}
         >
           <button
-            onClick={addPort}
+            onClick={() =>
+              setImgPorts((prev) => [
+                ...prev,
+                { containerPort: 8080, name: "" },
+              ])
+            }
             style={{
               background: "none",
-              border: "1px dashed rgba(255,255,255,0.1)",
-              borderRadius: 4,
-              color: "rgba(255,255,255,0.25)",
-              fontSize: 10,
-              padding: "3px 8px",
+              border: "1px dashed var(--border-default)",
+              borderRadius: "var(--radius-xs)",
+              color: "var(--text-faint)",
+              fontSize: "var(--font-size-xs)",
+              padding: "3px 9px",
               cursor: "pointer",
-              fontFamily: "monospace",
+              fontFamily: "var(--font-ui)",
+              transition: "var(--ease-fast)",
             }}
           >
             + port
@@ -1798,18 +1892,16 @@ function ConfigureImage({
             <select
               value={imgServiceType}
               onChange={(e) =>
-                setImgServiceType(
-                  e.target.value as "ClusterIP" | "NodePort" | "LoadBalancer",
-                )
+                setImgServiceType(e.target.value as typeof imgServiceType)
               }
               style={{
-                background: "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 4,
-                color: "rgba(255,255,255,0.5)",
-                fontSize: 10,
-                padding: "3px 6px",
-                fontFamily: "monospace",
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border-default)",
+                borderRadius: "var(--radius-xs)",
+                color: "var(--text-muted)",
+                fontSize: "var(--font-size-xs)",
+                padding: "3px 7px",
+                fontFamily: "var(--font-ui)",
                 cursor: "pointer",
                 outline: "none",
               }}
@@ -1822,174 +1914,126 @@ function ConfigureImage({
         </div>
       </div>
 
-      {/* Plain ENV */}
+      {/* Plain env */}
       <div>
-        <label style={IMG_LBL}>
+        <label style={LBL}>
           Env Variables{" "}
-          <span
-            style={{ textTransform: "none", color: "rgba(255,255,255,0.15)" }}
-          >
+          <span style={{ textTransform: "none", color: "var(--text-faint)" }}>
             (plain)
           </span>
         </label>
-        {imgEnv.map((e, i) => (
-          <div
-            key={i}
-            style={{
-              display: "flex",
-              gap: 5,
-              alignItems: "center",
-              marginBottom: 4,
-            }}
-          >
-            <input
-              value={e.key}
-              onChange={(ev) => updateEnv(i, "key", ev.target.value, false)}
-              placeholder="KEY"
-              style={{
-                flex: "0 0 40%",
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.07)",
-                borderRadius: 4,
-                color: "rgba(255,255,255,0.45)",
-                fontSize: 10,
-                padding: "4px 7px",
-                outline: "none",
-                fontFamily: "monospace",
-              }}
-            />
-            <input
-              value={e.value}
-              onChange={(ev) => updateEnv(i, "value", ev.target.value, false)}
-              placeholder="value"
-              style={{ flex: 1, ...IMG_INP, fontSize: 10, padding: "4px 7px" }}
-              onFocus={(ev) => (ev.target.style.borderColor = t.border)}
-              onBlur={(ev) =>
-                (ev.target.style.borderColor = "rgba(255,255,255,0.1)")
-              }
-            />
-            <button
-              onClick={() => removeEnv(i, false)}
-              style={{
-                background: "none",
-                border: "none",
-                color: "rgba(239,68,68,0.4)",
-                cursor: "pointer",
-                fontSize: 12,
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        ))}
-        <button
-          onClick={() => addEnv(false)}
-          style={{
-            background: "none",
-            border: "1px dashed rgba(255,255,255,0.1)",
-            borderRadius: 4,
-            color: "rgba(255,255,255,0.25)",
-            fontSize: 10,
-            padding: "3px 8px",
-            cursor: "pointer",
-            fontFamily: "monospace",
-          }}
-        >
-          + env
-        </button>
+        <EnvEditor vars={imgEnv} onChange={(v) => setImgEnv(v)} />
       </div>
 
-      {/* Secret ENV */}
+      {/* Secret env */}
       <div>
-        <label style={IMG_LBL}>
-          <span style={{ color: "#f87171" }}>🔒</span> Secret Env{" "}
-          <span
-            style={{ textTransform: "none", color: "rgba(255,255,255,0.15)" }}
-          >
+        <label style={LBL}>
+          <AppIcon
+            name="secret"
+            size={12}
+            strokeWidth={1.75}
+            style={{ color: "var(--ctp-red)", marginRight: 4 }}
+          />{" "}
+          Secret Env{" "}
+          <span style={{ textTransform: "none", color: "var(--text-faint)" }}>
             (stored in K8s Secret)
           </span>
         </label>
-        {imgSecretEnv.map((e, i) => (
-          <div
-            key={i}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {imgSecretEnv.map((e, i) => (
+            <div
+              key={i}
+              style={{ display: "flex", gap: 5, alignItems: "center" }}
+            >
+              <input
+                value={e.key}
+                onChange={(ev) =>
+                  setImgSecretEnv((prev) =>
+                    prev.map((x, j) =>
+                      j === i ? { ...x, key: ev.target.value } : x,
+                    ),
+                  )
+                }
+                placeholder="SECRET_KEY"
+                style={{
+                  ...INP,
+                  flex: "0 0 44%",
+                  fontSize: "var(--font-size-xs)",
+                  padding: "4px 8px",
+                  borderColor: "rgba(243,139,168,0.20)",
+                }}
+              />
+              <input
+                value={e.value}
+                type="password"
+                onChange={(ev) =>
+                  setImgSecretEnv((prev) =>
+                    prev.map((x, j) =>
+                      j === i ? { ...x, value: ev.target.value } : x,
+                    ),
+                  )
+                }
+                placeholder="secret value"
+                style={{
+                  ...INP,
+                  flex: 1,
+                  fontSize: "var(--font-size-xs)",
+                  padding: "4px 8px",
+                  background: "rgba(243,139,168,0.04)",
+                  borderColor: "rgba(243,139,168,0.20)",
+                }}
+              />
+              <button
+                onClick={() =>
+                  setImgSecretEnv((prev) => prev.filter((_, j) => j !== i))
+                }
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--ctp-red)",
+                  cursor: "pointer",
+                  fontSize: 11,
+                  opacity: 0.6,
+                }}
+                onMouseEnter={(e) =>
+                  ((e.currentTarget as HTMLElement).style.opacity = "1")
+                }
+                onMouseLeave={(e) =>
+                  ((e.currentTarget as HTMLElement).style.opacity = "0.6")
+                }
+              >
+                <AppIcon name="close" size={10} strokeWidth={2.5} />
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() =>
+              setImgSecretEnv((prev) => [...prev, { key: "", value: "" }])
+            }
             style={{
-              display: "flex",
-              gap: 5,
-              alignItems: "center",
-              marginBottom: 4,
+              background: "none",
+              border: "1px dashed rgba(243,139,168,0.20)",
+              borderRadius: "var(--radius-xs)",
+              color: "rgba(243,139,168,0.45)",
+              fontSize: "var(--font-size-xs)",
+              padding: "4px 10px",
+              cursor: "pointer",
+              fontFamily: "var(--font-ui)",
+              textAlign: "left",
+              marginTop: 2,
+              transition: "var(--ease-fast)",
             }}
           >
-            <input
-              value={e.key}
-              onChange={(ev) => updateEnv(i, "key", ev.target.value, true)}
-              placeholder="SECRET_KEY"
-              style={{
-                flex: "0 0 40%",
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(239,68,68,0.2)",
-                borderRadius: 4,
-                color: "rgba(255,255,255,0.45)",
-                fontSize: 10,
-                padding: "4px 7px",
-                outline: "none",
-                fontFamily: "monospace",
-              }}
-            />
-            <input
-              value={e.value}
-              type="password"
-              onChange={(ev) => updateEnv(i, "value", ev.target.value, true)}
-              placeholder="secret value"
-              style={{
-                flex: 1,
-                background: "rgba(239,68,68,0.05)",
-                border: "1px solid rgba(239,68,68,0.2)",
-                borderRadius: 4,
-                color: "white",
-                fontSize: 10,
-                padding: "4px 7px",
-                outline: "none",
-                fontFamily: "monospace",
-              }}
-            />
-            <button
-              onClick={() => removeEnv(i, true)}
-              style={{
-                background: "none",
-                border: "none",
-                color: "rgba(239,68,68,0.4)",
-                cursor: "pointer",
-                fontSize: 12,
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        ))}
-        <button
-          onClick={() => addEnv(true)}
-          style={{
-            background: "none",
-            border: "1px dashed rgba(239,68,68,0.2)",
-            borderRadius: 4,
-            color: "rgba(239,68,68,0.35)",
-            fontSize: 10,
-            padding: "3px 8px",
-            cursor: "pointer",
-            fontFamily: "monospace",
-          }}
-        >
-          + secret
-        </button>
+            + secret
+          </button>
+        </div>
       </div>
 
       {/* Pull secret */}
       <div>
-        <label style={IMG_LBL}>
+        <label style={LBL}>
           Image Pull Secret{" "}
-          <span
-            style={{ textTransform: "none", color: "rgba(255,255,255,0.15)" }}
-          >
+          <span style={{ textTransform: "none", color: "var(--text-faint)" }}>
             (private registry)
           </span>
         </label>
@@ -1997,9 +2041,15 @@ function ConfigureImage({
           value={imgPullSecret}
           onChange={(e) => setImgPullSecret(e.target.value)}
           placeholder="my-registry-secret (optional)"
-          style={{ ...IMG_INP, color: "rgba(255,255,255,0.4)" }}
-          onFocus={(e) => (e.target.style.borderColor = "rgba(96,165,250,0.6)")}
-          onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")}
+          style={{ ...INP, color: "var(--text-muted)" }}
+          onFocus={(e) =>
+            ((e.target as HTMLInputElement).style.borderColor =
+              "var(--border-accent)")
+          }
+          onBlur={(e) =>
+            ((e.target as HTMLInputElement).style.borderColor =
+              "var(--border-default)")
+          }
         />
       </div>
 
@@ -2008,214 +2058,9 @@ function ConfigureImage({
         onSubmit={onSubmit}
         creating={creating}
         result={result}
-        t={t}
-        label="Deploy →"
+        tt={tt}
+        label="Deploy"
       />
-    </div>
-  );
-}
-
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-function PresetCard({
-  tt,
-  onClick,
-  children,
-}: {
-  tt: (typeof NODE_STYLES)[string];
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  const [hov, setHov] = React.useState(false);
-  return (
-    <div
-      onClick={onClick}
-      onMouseEnter={() => setHov(true)}
-      onMouseLeave={() => setHov(false)}
-      style={{
-        padding: "12px 14px",
-        borderRadius: 8,
-        border: `1.5px solid ${hov ? tt.border.replace("0.6)", "0.5)").replace("0.55)", "0.45)") : "rgba(255,255,255,0.07)"}`,
-        background: hov ? tt.bg : "rgba(255,255,255,0.02)",
-        boxShadow: hov ? `0 0 16px ${tt.shadow}` : "none",
-        cursor: "pointer",
-        display: "flex",
-        flexDirection: "column",
-        gap: 5,
-        transition: "all 0.12s",
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function TypeBadge({ tt }: { tt: (typeof NODE_STYLES)[string] }) {
-  return (
-    <span
-      style={{
-        fontSize: 9,
-        color: tt.accent,
-        padding: "1px 5px",
-        borderRadius: 3,
-        background: `${tt.accent}18`,
-        border: `1px solid ${tt.accent}33`,
-      }}
-    >
-      {tt.label}
-    </span>
-  );
-}
-
-function PresetBadge({
-  t,
-  sub,
-  children,
-}: {
-  t: (typeof NODE_STYLES)[string];
-  sub: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        padding: "8px 12px",
-        background: t.bg,
-        border: `1px solid ${t.border}`,
-        borderRadius: 7,
-        boxShadow: `0 0 14px ${t.shadow}`,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        flexShrink: 0,
-      }}
-    >
-      <span style={{ fontSize: 18 }}>{t.icon}</span>
-      <div>
-        <div style={{ color: t.color, fontWeight: 600, fontSize: 12 }}>
-          {children}
-        </div>
-        <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 10 }}>
-          {sub}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FilesPreview({ files, accent }: { files: string[]; accent: string }) {
-  return (
-    <div>
-      <div
-        style={{
-          display: "block",
-          color: "rgba(255,255,255,0.3)",
-          fontSize: 10,
-          letterSpacing: "0.08em",
-          textTransform: "uppercase",
-          marginBottom: 5,
-        }}
-      >
-        Will create
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        {files.map((f) => (
-          <div
-            key={f}
-            style={{ display: "flex", alignItems: "center", gap: 5 }}
-          >
-            <span style={{ color: accent, fontSize: 9 }}>◦</span>
-            <span
-              style={{
-                color: "rgba(255,255,255,0.28)",
-                fontSize: 10,
-                fontFamily: "monospace",
-              }}
-            >
-              {f}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ActionRow({
-  onClose,
-  onSubmit,
-  creating,
-  result,
-  t,
-  label,
-}: {
-  onClose: () => void;
-  onSubmit: () => void;
-  creating: boolean;
-  result: string | null;
-  t: (typeof NODE_STYLES)[string];
-  label: string;
-}) {
-  const ok = result?.startsWith("✓");
-  const warn = result?.startsWith("⚠");
-  return (
-    <div style={{ display: "flex", gap: 8, flexShrink: 0, paddingBottom: 2 }}>
-      <button
-        onClick={onClose}
-        style={{
-          flex: 1,
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: 7,
-          color: "rgba(255,255,255,0.4)",
-          fontSize: 12,
-          padding: "8px 0",
-          cursor: "pointer",
-          fontFamily: "monospace",
-        }}
-      >
-        Cancel
-      </button>
-      <button
-        onClick={onSubmit}
-        disabled={creating || ok || warn}
-        style={{
-          flex: 2.5,
-          background: ok
-            ? "rgba(16,185,129,0.25)"
-            : warn
-              ? "rgba(234,88,12,0.25)"
-              : creating
-                ? "rgba(37,99,235,0.4)"
-                : `linear-gradient(135deg,${t.accent}bb,${t.accent})`,
-          border: `1px solid ${t.border}`,
-          borderRadius: 7,
-          color: ok ? "#6ee7b7" : warn ? "#fdba74" : "white",
-          fontSize: 12,
-          fontWeight: 600,
-          padding: "8px 0",
-          cursor: creating ? "not-allowed" : "pointer",
-          fontFamily: "monospace",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 6,
-        }}
-      >
-        {creating && !result && (
-          <div
-            style={{
-              width: 11,
-              height: 11,
-              borderRadius: "50%",
-              border: "1.5px solid rgba(255,255,255,0.3)",
-              borderTopColor: "white",
-              animation: "spin 0.7s linear infinite",
-            }}
-          />
-        )}
-        {result || label}
-      </button>
     </div>
   );
 }

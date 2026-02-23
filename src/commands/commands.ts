@@ -3,7 +3,11 @@
  * Allows future Command Palette integration.
  */
 import { useIDEStore } from "../store/ideStore";
-import { YamlNode } from "../store/tauriStore";
+import {
+  YamlNode,
+  deleteFieldFiles,
+  removeResource,
+} from "../store/tauriStore";
 
 export type CommandId =
   | "field.openYaml"
@@ -26,15 +30,28 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
 
   switch (id) {
     case "field.openInExplorer": {
-      // Make sure explorer is visible and select the node
-      store.setAreaVisible("left", true);
       store.setSelectedEntity({
         type: "field",
         id: node.id,
         label: node.label,
         filePath: node.file_path,
-        meta: { kind: node.kind, typeId: node.type_id, namespace: node.namespace, source: node.source },
+        meta: {
+          kind: node.kind,
+          typeId: node.type_id,
+          namespace: node.namespace,
+          source: node.source,
+        },
       });
+      // openTab handles both: re-activating existing tab AND re-opening after close
+      store.openTab(
+        {
+          id: "tab-explorer",
+          title: "Explorer",
+          contentType: "explorer",
+          icon: "explorer",
+        },
+        "left",
+      );
       break;
     }
 
@@ -47,9 +64,9 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
             title: filePath.split("/").pop() ?? node.label,
             contentType: "file",
             filePath,
-            icon: filePath.includes("Chart.yaml") ? "⛵" : "📄",
+            icon: filePath.includes("Chart.yaml") ? "helmRelease" : "fileYaml",
           },
-          "center"
+          "center",
         );
       } else {
         // Create placeholder tab for nodes without a file
@@ -59,9 +76,9 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
             title: `${node.label}.yaml`,
             contentType: "file",
             filePath: undefined,
-            icon: "📄",
+            icon: "fileYaml",
           },
-          "center"
+          "center",
         );
       }
       break;
@@ -82,8 +99,16 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
           image: node.image,
         },
       });
-      // Ensure inspector is visible
-      store.setAreaVisible("right", true);
+      // openTab handles both: re-activating existing tab AND re-opening after close
+      store.openTab(
+        {
+          id: "tab-inspector",
+          title: "Properties",
+          contentType: "inspector",
+          icon: "inspector",
+        },
+        "right",
+      );
       break;
     }
 
@@ -93,9 +118,9 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
           id: "tab-logs",
           title: "Logs",
           contentType: "clusterLogs",
-          icon: "≡",
+          icon: "clusterLogs",
         },
-        "bottom"
+        "bottom",
       );
       store.setAreaVisible("bottom", true);
       break;
@@ -107,9 +132,9 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
           id: "tab-diff",
           title: "Cluster Diff",
           contentType: "clusterDiff",
-          icon: "⊞",
+          icon: "clusterDiff",
         },
-        "bottom"
+        "bottom",
       );
       store.setAreaVisible("bottom", true);
       break;
@@ -123,19 +148,50 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
     }
 
     case "field.delete": {
-      // Close all tabs associated with this node
-      const state = useIDEStore.getState();
       const filePath = node.file_path;
+      const namespace = node.namespace ?? "default";
+
+      // 1. Remove from cluster (kubectl delete -f / helm uninstall)
       if (filePath) {
-        const tabId = `file-${filePath}`;
-        state.closeTab(tabId);
+        // For helm nodes the resourceDir is the parent of /helm/
+        // For raw nodes it's the directory containing the yaml file
+        const resourceDir = filePath.includes("/helm/")
+          ? filePath.substring(0, filePath.lastIndexOf("/helm/") + 1)
+          : filePath.substring(0, filePath.lastIndexOf("/") + 1);
+
+        removeResource(
+          node.id,
+          node.source,
+          resourceDir,
+          namespace,
+          node.helm?.release_name,
+        ).catch((err) => console.error("[delete] removeResource failed:", err));
       }
-      state.closeTab(`file-placeholder-${node.id}`);
-      // Deselect if this node was selected
-      const sel = state.selectedEntity;
+
+      // 2. Delete files from disk
+      if (filePath) {
+        // For helm: delete the whole component dir (parent of /helm/)
+        // For raw: delete just the yaml file
+        const filesToDelete = filePath.includes("/helm/")
+          ? [filePath.substring(0, filePath.lastIndexOf("/helm/") + 1)]
+          : [filePath];
+
+        deleteFieldFiles(filesToDelete, namespace).catch((err) =>
+          console.error("[delete] deleteFieldFiles failed:", err),
+        );
+      }
+
+      // 3. Close open tabs for this node
+      if (filePath) store.closeTab(`file-${filePath}`);
+      store.closeTab(`file-placeholder-${node.id}`);
+
+      // 4. Deselect if this node was selected
+      const sel = store.selectedEntity;
       if (sel && (sel.id === node.id || sel.filePath === node.file_path)) {
-        state.setSelectedEntity(null);
+        store.setSelectedEntity(null);
       }
+
+      // 5. Remove from IDE store
       store.removeNode(node.id);
       break;
     }

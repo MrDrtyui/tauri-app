@@ -64,7 +64,11 @@ interface IDEStore {
 
   // ── Move / split / dock ──────────────────────────────────────────────────────
   moveTab: (tabId: string, targetGroupId: string) => void;
-  dropTab: (tabId: string, targetGroupId: string, position: DropPosition) => void;
+  dropTab: (
+    tabId: string,
+    targetGroupId: string,
+    position: DropPosition,
+  ) => void;
 
   // ── Area resize ──────────────────────────────────────────────────────────────
   setAreaSize: (slot: DockSlot, size: number) => void;
@@ -90,7 +94,7 @@ interface IDEStore {
 function updateGroupInAreas(
   areas: DockArea[],
   groupId: string,
-  updater: (g: TabGroupNode) => TabGroupNode
+  updater: (g: TabGroupNode) => TabGroupNode,
 ): DockArea[] {
   return areas.map((area) => {
     if (!area.root) return area;
@@ -101,10 +105,7 @@ function updateGroupInAreas(
   });
 }
 
-function findGroupInTree(
-  root: LayoutNode,
-  id: string
-): TabGroupNode | null {
+function findGroupInTree(root: LayoutNode, id: string): TabGroupNode | null {
   if (root.type === "tabgroup") return root.id === id ? root : null;
   return findGroupInTree(root.first, id) || findGroupInTree(root.second, id);
 }
@@ -112,7 +113,7 @@ function findGroupInTree(
 function setSplitRatioInTree(
   root: LayoutNode,
   nodeId: string,
-  ratio: number
+  ratio: number,
 ): LayoutNode {
   if (root.type === "tabgroup") return root;
   if (root.id === nodeId) return { ...root, splitRatio: ratio };
@@ -140,7 +141,7 @@ function getOrCreateCenterGroup(areas: DockArea[]): {
     activeTabId: null,
   };
   const updated = areas.map((a) =>
-    a.slot === "center" ? { ...a, root: newGroup } : a
+    a.slot === "center" ? { ...a, root: newGroup } : a,
   );
   return { areas: updated, groupId: newGroup.id };
 }
@@ -168,7 +169,11 @@ export const useIDEStore = create<IDEStore>()(
       const layout = await loadEndfieldLayout(result.project_path);
       const nodes = applyLayoutToNodes(result.nodes, layout);
       // Open project with graph-only view — user opens panels via View menu
-      set({ projectPath: result.project_path, nodes, areas: GRAPH_ONLY_LAYOUT.areas });
+      set({
+        projectPath: result.project_path,
+        nodes,
+        areas: GRAPH_ONLY_LAYOUT.areas,
+      });
     },
 
     closeProject: () => {
@@ -177,7 +182,9 @@ export const useIDEStore = create<IDEStore>()(
 
     updateNodePosition: (id: string, x: number, y: number) => {
       set((state) => {
-        const nodes = state.nodes.map((n) => (n.id === id ? { ...n, x, y } : n));
+        const nodes = state.nodes.map((n) =>
+          n.id === id ? { ...n, x, y } : n,
+        );
         // Fire-and-forget save to .endfield
         if (state.projectPath) {
           const fields: FieldLayoutEntry[] = nodes.map((n) => ({
@@ -214,7 +221,9 @@ export const useIDEStore = create<IDEStore>()(
 
     renameNode: (id: string, newName: string) => {
       set((state) => ({
-        nodes: state.nodes.map((n) => n.id === id ? { ...n, label: newName } : n),
+        nodes: state.nodes.map((n) =>
+          n.id === id ? { ...n, label: newName } : n,
+        ),
       }));
     },
 
@@ -232,12 +241,14 @@ export const useIDEStore = create<IDEStore>()(
       // Check if tab already open somewhere
       const existing = findTabLocation(areas, tab.id);
       if (existing) {
-        // Just activate it
+        // Activate it AND make its area visible (so View menu toggles work correctly)
         set({
           areas: updateGroupInAreas(areas, existing.group.id, (g) => ({
             ...g,
             activeTabId: tab.id,
-          })),
+          })).map((a) =>
+            a.slot === existing.area.slot ? { ...a, visible: true } : a,
+          ),
         });
         return;
       }
@@ -250,8 +261,8 @@ export const useIDEStore = create<IDEStore>()(
           const targetGroup = groups[0];
           set({
             areas: updateGroupInAreas(areas, targetGroup.id, (g) =>
-              addTabToGroup(g, tab)
-            ),
+              addTabToGroup(g, tab),
+            ).map((a) => (a.slot === preferSlot ? { ...a, visible: true } : a)),
           });
           return;
         }
@@ -266,7 +277,7 @@ export const useIDEStore = create<IDEStore>()(
       };
       set({
         areas: areas.map((a) =>
-          a.slot === preferSlot ? { ...a, root: newGroup, visible: true } : a
+          a.slot === preferSlot ? { ...a, root: newGroup, visible: true } : a,
         ),
       });
     },
@@ -316,7 +327,7 @@ export const useIDEStore = create<IDEStore>()(
             root: mapGroupsInTree(area.root, (g) => ({
               ...g,
               tabs: g.tabs.map((t) =>
-                t.id === tabId ? { ...t, isDirty: dirty } : t
+                t.id === tabId ? { ...t, isDirty: dirty } : t,
               ),
             })),
           };
@@ -347,7 +358,7 @@ export const useIDEStore = create<IDEStore>()(
 
       // Add to target
       areas = updateGroupInAreas(areas, targetGroupId, (g) =>
-        addTabToGroup(g, tab)
+        addTabToGroup(g, tab),
       );
 
       set({ areas });
@@ -379,14 +390,17 @@ export const useIDEStore = create<IDEStore>()(
 
       // Find target group and split it
       const targetLoc = findGroupLocation(areas, targetGroupId);
-      if (!targetLoc) { set({ areas }); return; }
+      if (!targetLoc) {
+        set({ areas });
+        return;
+      }
 
       const splitInfo = dropPositionToSplit(position)!;
       const newSplit = splitGroupNode(
         targetLoc.group,
         splitInfo.direction,
         splitInfo.newGroupFirst,
-        tab
+        tab,
       );
 
       areas = areas.map((a) => {
@@ -410,7 +424,10 @@ export const useIDEStore = create<IDEStore>()(
       set({
         areas: get().areas.map((area) => {
           if (!area.root) return area;
-          return { ...area, root: setSplitRatioInTree(area.root, nodeId, ratio) };
+          return {
+            ...area,
+            root: setSplitRatioInTree(area.root, nodeId, ratio),
+          };
         }),
       });
     },
@@ -462,14 +479,14 @@ export const useIDEStore = create<IDEStore>()(
     resetLayout: () => {
       set({ areas: DEFAULT_LAYOUT.areas });
     },
-  }))
+  })),
 );
 
 // ─── Tree mapper helper ───────────────────────────────────────────────────────
 
 function mapGroupsInTree(
   root: LayoutNode,
-  fn: (g: TabGroupNode) => TabGroupNode
+  fn: (g: TabGroupNode) => TabGroupNode,
 ): LayoutNode {
   if (root.type === "tabgroup") return fn(root);
   return {

@@ -164,11 +164,15 @@ export interface DiffResult {
 
 // ─── Tauri detection ──────────────────────────────────────────────────────────
 
-const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const IS_TAURI =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 // ─── safeInvoke ──────────────────────────────────────────────────────────────
 
-async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function safeInvoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   try {
     return await invoke<T>(cmd, args);
   } catch (e) {
@@ -189,6 +193,8 @@ function devFallback<T>(cmd: string, args?: Record<string, unknown>): T {
     case "get_cluster_status":
       return DEV_CLUSTER_STATUS as T;
     case "apply_replicas":
+    case "scan_project_files":
+      return [] as T;
     case "kubectl_apply":
       return "✓ Applied (dev)" as T;
     case "save_yaml_file":
@@ -206,23 +212,35 @@ function devFallback<T>(cmd: string, args?: Record<string, unknown>): T {
     // ── New commands ──
     case "generate_field":
       return {
-        generated_files: ["apps/field/deployment.yaml", "apps/field/service.yaml", "apps/field/configmap.yaml"],
+        generated_files: [
+          "apps/field/deployment.yaml",
+          "apps/field/service.yaml",
+          "apps/field/configmap.yaml",
+        ],
         namespace_created: true,
-        namespace: (args as { config?: FieldConfig })?.config?.namespace ?? "default",
+        namespace:
+          (args as { config?: FieldConfig })?.config?.namespace ?? "default",
         warnings: [],
         error: null,
       } as T;
     case "generate_infra":
       return {
-        generated_files: ["infra/component/namespace.yaml", "infra/component/helm/Chart.yaml", "infra/component/helm/values.yaml"],
+        generated_files: [
+          "infra/component/namespace.yaml",
+          "infra/component/helm/Chart.yaml",
+          "infra/component/helm/values.yaml",
+        ],
         namespace_created: true,
-        namespace: (args as { config?: InfraConfig })?.config?.namespace ?? "infra-component",
+        namespace:
+          (args as { config?: InfraConfig })?.config?.namespace ??
+          "infra-component",
         warnings: [],
         error: null,
       } as T;
     case "deploy_resource":
       return {
-        resource_id: (args as Record<string, string>)?.resource_id ?? "resource",
+        resource_id:
+          (args as Record<string, string>)?.resource_id ?? "resource",
         namespace: (args as Record<string, string>)?.namespace ?? "default",
         source: (args as Record<string, string>)?.source ?? "raw",
         stdout: "deployment.apps/resource configured (dev)",
@@ -239,17 +257,21 @@ function devFallback<T>(cmd: string, args?: Record<string, unknown>): T {
       } as T;
     case "remove_resource":
       return {
-        resource_id: (args as Record<string, string>)?.resource_id ?? "resource",
+        resource_id:
+          (args as Record<string, string>)?.resource_id ?? "resource",
         namespace: (args as Record<string, string>)?.namespace ?? "default",
         source: (args as Record<string, string>)?.source ?? "raw",
         stdout: "deployment.apps/resource deleted (dev)",
         stderr: "",
         success: true,
-        commands_run: ["kubectl delete -f apps/resource/ --recursive --ignore-not-found=true"],
+        commands_run: [
+          "kubectl delete -f apps/resource/ --recursive --ignore-not-found=true",
+        ],
       } as T;
     case "diff_resource":
       return {
-        resource_id: (args as Record<string, string>)?.resource_id ?? "resource",
+        resource_id:
+          (args as Record<string, string>)?.resource_id ?? "resource",
         diff: "",
         has_changes: false,
         error: null,
@@ -273,13 +295,14 @@ function devFallback<T>(cmd: string, args?: Record<string, unknown>): T {
         error: null,
         manifests: {
           namespace: req.createNamespace
-            ? `apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${ns}\n` : undefined,
+            ? `apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${ns}\n`
+            : undefined,
           secret: secretName
             ? `apiVersion: v1\nkind: Secret\nmetadata:\n  name: ${secretName}\n  namespace: ${ns}\ntype: Opaque\nstringData:\n` +
-              req.secretEnv.map(e => `  ${e.key}: "${e.value}"`).join("\n") + "\n"
+              req.secretEnv.map((e) => `  ${e.key}: "${e.value}"`).join("\n") +
+              "\n"
             : undefined,
-          deployment:
-            `apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ${n}\n  namespace: ${ns}\n  labels:\n    app.kubernetes.io/name: ${n}\n    app.kubernetes.io/managed-by: endfield\n    endfield/type: image-deploy\nspec:\n  replicas: ${req.replicas}\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: ${n}\n  template:\n    metadata:\n      labels:\n        app.kubernetes.io/name: ${n}\n    spec:\n      containers:\n        - name: ${n}\n          image: ${req.image}\n`,
+          deployment: `apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ${n}\n  namespace: ${ns}\n  labels:\n    app.kubernetes.io/name: ${n}\n    app.kubernetes.io/managed-by: endfield\n    endfield/type: image-deploy\nspec:\n  replicas: ${req.replicas}\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: ${n}\n  template:\n    metadata:\n      labels:\n        app.kubernetes.io/name: ${n}\n    spec:\n      containers:\n        - name: ${n}\n          image: ${req.image}\n`,
           service: serviceName
             ? `apiVersion: v1\nkind: Service\nmetadata:\n  name: ${n}\n  namespace: ${ns}\nspec:\n  selector:\n    app.kubernetes.io/name: ${n}\n  type: ${req.serviceType}\n`
             : undefined,
@@ -306,7 +329,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "infra-ingress-nginx",
       file_path: "/home/user/infra/infra/ingress-nginx/helm/Chart.yaml",
       replicas: null,
-      x: 8, y: 40,
+      x: 8,
+      y: 40,
       source: "helm",
       helm: {
         release_name: "ingress-nginx",
@@ -327,7 +351,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "myapp",
       file_path: "/home/user/infra/apps/auth-deployment.yaml",
       replicas: 3,
-      x: 32, y: 15,
+      x: 32,
+      y: 15,
       source: "raw",
     },
     {
@@ -339,7 +364,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "myapp",
       file_path: "/home/user/infra/apps/api-deployment.yaml",
       replicas: 2,
-      x: 32, y: 50,
+      x: 32,
+      y: 50,
       source: "raw",
     },
     {
@@ -351,7 +377,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "myapp",
       file_path: "/home/user/infra/apps/frontend-deployment.yaml",
       replicas: 2,
-      x: 32, y: 80,
+      x: 32,
+      y: 80,
       source: "raw",
     },
     {
@@ -363,7 +390,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "infra-redis",
       file_path: "/home/user/infra/infra/redis/helm/Chart.yaml",
       replicas: null,
-      x: 60, y: 15,
+      x: 60,
+      y: 15,
       source: "helm",
       helm: {
         release_name: "redis",
@@ -384,7 +412,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "myapp",
       file_path: "/home/user/infra/databases/postgres-statefulset.yaml",
       replicas: 1,
-      x: 60, y: 45,
+      x: 60,
+      y: 45,
       source: "raw",
     },
     {
@@ -396,7 +425,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "myapp",
       file_path: "/home/user/infra/messaging/kafka-statefulset.yaml",
       replicas: 3,
-      x: 60, y: 72,
+      x: 60,
+      y: 72,
       source: "raw",
     },
     {
@@ -408,7 +438,8 @@ const DEV_SCAN_RESULT: ScanResult = {
       namespace: "infra-monitoring",
       file_path: "/home/user/infra/infra/monitoring/helm/Chart.yaml",
       replicas: null,
-      x: 84, y: 40,
+      x: 84,
+      y: 40,
       source: "helm",
       helm: {
         release_name: "kube-prometheus-stack",
@@ -427,14 +458,78 @@ const DEV_CLUSTER_STATUS: ClusterStatus = {
   kubectl_available: true,
   error: null,
   fields: [
-    { label: "ingress-nginx",         namespace: "infra-ingress-nginx", desired: 1, ready: 1, available: 1, status: "green",  pods: [] },
-    { label: "auth-service",          namespace: "myapp",               desired: 3, ready: 2, available: 2, status: "yellow", pods: [] },
-    { label: "api-gateway",           namespace: "myapp",               desired: 2, ready: 2, available: 2, status: "green",  pods: [] },
-    { label: "frontend",              namespace: "myapp",               desired: 2, ready: 2, available: 2, status: "green",  pods: [] },
-    { label: "redis",                 namespace: "infra-redis",          desired: 1, ready: 1, available: 1, status: "green",  pods: [] },
-    { label: "postgres-db",           namespace: "myapp",               desired: 1, ready: 1, available: 1, status: "green",  pods: [] },
-    { label: "kafka-broker",          namespace: "myapp",               desired: 3, ready: 3, available: 3, status: "green",  pods: [] },
-    { label: "kube-prometheus-stack", namespace: "infra-monitoring",    desired: 1, ready: 1, available: 1, status: "green",  pods: [] },
+    {
+      label: "ingress-nginx",
+      namespace: "infra-ingress-nginx",
+      desired: 1,
+      ready: 1,
+      available: 1,
+      status: "green",
+      pods: [],
+    },
+    {
+      label: "auth-service",
+      namespace: "myapp",
+      desired: 3,
+      ready: 2,
+      available: 2,
+      status: "yellow",
+      pods: [],
+    },
+    {
+      label: "api-gateway",
+      namespace: "myapp",
+      desired: 2,
+      ready: 2,
+      available: 2,
+      status: "green",
+      pods: [],
+    },
+    {
+      label: "frontend",
+      namespace: "myapp",
+      desired: 2,
+      ready: 2,
+      available: 2,
+      status: "green",
+      pods: [],
+    },
+    {
+      label: "redis",
+      namespace: "infra-redis",
+      desired: 1,
+      ready: 1,
+      available: 1,
+      status: "green",
+      pods: [],
+    },
+    {
+      label: "postgres-db",
+      namespace: "myapp",
+      desired: 1,
+      ready: 1,
+      available: 1,
+      status: "green",
+      pods: [],
+    },
+    {
+      label: "kafka-broker",
+      namespace: "myapp",
+      desired: 3,
+      ready: 3,
+      available: 3,
+      status: "green",
+      pods: [],
+    },
+    {
+      label: "kube-prometheus-stack",
+      namespace: "infra-monitoring",
+      desired: 1,
+      ready: 1,
+      available: 1,
+      status: "green",
+      pods: [],
+    },
   ],
 };
 
@@ -467,7 +562,14 @@ export async function readYamlFile(filePath: string): Promise<string> {
   return safeInvoke<string>("read_yaml_file", { filePath });
 }
 
-export async function saveYamlFile(filePath: string, content: string): Promise<void> {
+export async function scanProjectFiles(folderPath: string): Promise<string[]> {
+  return safeInvoke<string[]>("scan_project_files", { folderPath });
+}
+
+export async function saveYamlFile(
+  filePath: string,
+  content: string,
+): Promise<void> {
   return safeInvoke("save_yaml_file", { filePath, content });
 }
 
@@ -480,7 +582,11 @@ export async function applyReplicas(
   nodeLabel: string,
   replicas: number,
 ): Promise<string> {
-  return safeInvoke<string>("apply_replicas", { filePath, nodeLabel, replicas });
+  return safeInvoke<string>("apply_replicas", {
+    filePath,
+    nodeLabel,
+    replicas,
+  });
 }
 
 export async function kubectlApply(path: string): Promise<string> {
@@ -518,10 +624,18 @@ export async function helmInstall(
   namespace: string,
   valuesFile?: string,
 ): Promise<string> {
-  return safeInvoke<string>("helm_install", { componentDir, releaseName, namespace, valuesFile });
+  return safeInvoke<string>("helm_install", {
+    componentDir,
+    releaseName,
+    namespace,
+    valuesFile,
+  });
 }
 
-export async function helmUninstall(releaseName: string, namespace: string): Promise<string> {
+export async function helmUninstall(
+  releaseName: string,
+  namespace: string,
+): Promise<string> {
   return safeInvoke<string>("helm_uninstall", { releaseName, namespace });
 }
 
@@ -554,7 +668,9 @@ export async function loadEndfieldLayout(
   projectPath: string,
 ): Promise<EndfieldLayout | null> {
   try {
-    return await safeInvoke<EndfieldLayout>("load_endfield_layout", { projectPath });
+    return await safeInvoke<EndfieldLayout>("load_endfield_layout", {
+      projectPath,
+    });
   } catch {
     return null;
   }
@@ -582,7 +698,9 @@ export function applyLayoutToNodes(
  * Writes: apps/<id>/namespace.yaml, deployment.yaml, service.yaml, configmap.yaml
  * Does NOT deploy. Returns list of created files.
  */
-export async function generateField(config: FieldConfig): Promise<GenerateResult> {
+export async function generateField(
+  config: FieldConfig,
+): Promise<GenerateResult> {
   return safeInvoke<GenerateResult>("generate_field", { config });
 }
 
@@ -592,7 +710,9 @@ export async function generateField(config: FieldConfig): Promise<GenerateResult
  * For Raw: validates raw_yaml_path exists.
  * Does NOT deploy.
  */
-export async function generateInfra(config: InfraConfig): Promise<GenerateResult> {
+export async function generateInfra(
+  config: InfraConfig,
+): Promise<GenerateResult> {
   return safeInvoke<GenerateResult>("generate_infra", { config });
 }
 
@@ -689,7 +809,12 @@ export async function getFieldLogs(
   tail = 100,
   previous = false,
 ): Promise<string> {
-  return safeInvoke<string>("get_field_logs", { fieldId, namespace, tail, previous });
+  return safeInvoke<string>("get_field_logs", {
+    fieldId,
+    namespace,
+    tail,
+    previous,
+  });
 }
 
 // ─── Deploy Image types ───────────────────────────────────────────────────────
@@ -752,6 +877,8 @@ export interface DeployImageResult {
  * Creates: Namespace (optional), Secret (if secretEnv), Deployment, Service (if ports).
  * Idempotent: re-deploy updates image/env/replicas.
  */
-export async function deployImage(request: DeployImageRequest): Promise<DeployImageResult> {
+export async function deployImage(
+  request: DeployImageRequest,
+): Promise<DeployImageResult> {
   return safeInvoke<DeployImageResult>("deploy_image", { request });
 }

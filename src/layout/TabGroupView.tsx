@@ -2,6 +2,14 @@ import React, { useRef, useState } from "react";
 import { TabGroupNode, Tab, DropPosition } from "../layout/types";
 import { useIDEStore } from "../store/ideStore";
 import { PanelRenderer } from "./PanelRenderer";
+import { AppIcon, contentTypeIcon } from "../ui/AppIcon";
+import {
+  ArrowUp,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  Plus as PlusIcon,
+} from "lucide-react";
 
 interface TabGroupViewProps {
   group: TabGroupNode;
@@ -14,8 +22,6 @@ export function TabGroupView({ group, areaSlot }: TabGroupViewProps) {
   const dropTab = useIDEStore((s) => s.dropTab);
 
   const activeTab = group.tabs.find((t) => t.id === group.activeTabId);
-
-  // Show drop zones when dragging something that's not from this group
   const showDrop = dragState.isDragging && dragState.sourceGroupId !== group.id;
 
   const handleDrop = (position: DropPosition) => {
@@ -30,34 +36,27 @@ export function TabGroupView({ group, areaSlot }: TabGroupViewProps) {
         flexDirection: "column",
         width: "100%",
         height: "100%",
-        background: "#0d1526",
+        background: "var(--bg-primary)",
         position: "relative",
         overflow: "hidden",
       }}
       onMouseEnter={() => showDrop && setDropZoneVisible(true)}
       onMouseLeave={() => setDropZoneVisible(false)}
     >
-      {/* Tab bar */}
       <TabBar group={group} />
-
-      {/* Panel content */}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {activeTab ? (
           <PanelRenderer tab={activeTab} groupId={group.id} />
         ) : (
           <EmptyPanel />
         )}
-
-        {/* Drop zones overlay */}
-        {showDrop && dropZoneVisible && (
-          <DropZones onDrop={handleDrop} />
-        )}
+        {showDrop && dropZoneVisible && <DropZones onDrop={handleDrop} />}
       </div>
     </div>
   );
 }
 
-// ─── TabBar ───────────────────────────────────────────────────────────────────
+// ─── TabBar ───────────────────────────────────────────────────────
 
 function TabBar({ group }: { group: TabGroupNode }) {
   const setActiveTab = useIDEStore((s) => s.setActiveTab);
@@ -69,8 +68,8 @@ function TabBar({ group }: { group: TabGroupNode }) {
       style={{
         display: "flex",
         alignItems: "stretch",
-        background: "#070f1e",
-        borderBottom: "1px solid rgba(59,130,246,0.12)",
+        background: "var(--bg-surface)",
+        borderBottom: "1px solid var(--border-subtle)",
         height: 34,
         flexShrink: 0,
         overflowX: "auto",
@@ -92,7 +91,6 @@ function TabBar({ group }: { group: TabGroupNode }) {
         />
       ))}
 
-      {/* Add tab button */}
       <button
         title="New file"
         style={{
@@ -100,33 +98,44 @@ function TabBar({ group }: { group: TabGroupNode }) {
           width: 28,
           background: "none",
           border: "none",
-          borderRight: "1px solid rgba(255,255,255,0.04)",
-          color: "rgba(255,255,255,0.2)",
+          color: "var(--text-faint)",
           cursor: "pointer",
-          fontSize: 14,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           alignSelf: "center",
           margin: "0 2px",
-          borderRadius: 3,
+          borderRadius: "var(--radius-xs)",
+          transition: "var(--ease-fast)",
         }}
         onMouseEnter={(e) => {
-          e.currentTarget.style.background = "rgba(255,255,255,0.06)";
-          e.currentTarget.style.color = "rgba(255,255,255,0.5)";
+          (e.currentTarget as HTMLElement).style.background =
+            "var(--bg-elevated)";
+          (e.currentTarget as HTMLElement).style.color = "var(--text-muted)";
         }}
         onMouseLeave={(e) => {
-          e.currentTarget.style.background = "none";
-          e.currentTarget.style.color = "rgba(255,255,255,0.2)";
+          (e.currentTarget as HTMLElement).style.background = "none";
+          (e.currentTarget as HTMLElement).style.color = "var(--text-faint)";
         }}
       >
-        +
+        <PlusIcon size={13} strokeWidth={2} />
       </button>
     </div>
   );
 }
 
-// ─── TabItem ──────────────────────────────────────────────────────────────────
+// ─── TabItem ──────────────────────────────────────────────────────
+
+const TYPE_COLORS: Record<string, string> = {
+  file: "var(--ctp-lavender)",
+  graph: "var(--ctp-green)",
+  clusterDiff: "var(--ctp-red)",
+  clusterLogs: "var(--ctp-peach)",
+  inspector: "var(--ctp-mauve)",
+  explorer: "var(--ctp-teal)",
+  welcome: "var(--text-secondary)",
+  deployImage: "var(--ctp-sapphire)",
+};
 
 interface TabItemProps {
   tab: Tab;
@@ -136,24 +145,33 @@ interface TabItemProps {
   onDragStart: () => void;
 }
 
-function TabItem({ tab, isActive, onActivate, onClose, onDragStart }: TabItemProps) {
+function TabItem({
+  tab,
+  isActive,
+  onActivate,
+  onClose,
+  onDragStart,
+}: TabItemProps) {
   const dragState = useIDEStore((s) => s.dragState);
-  const isDragSource = dragState.isDragging && dragState.tab?.id === tab.id;
+  const isDragSrc = dragState.isDragging && dragState.tab?.id === tab.id;
+  const [hov, setHov] = useState(false);
+  const color = TYPE_COLORS[tab.contentType] ?? "var(--text-muted)";
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button === 1) {
-      // Middle click close
       e.preventDefault();
       onClose(e);
       return;
     }
     if (e.button === 0) {
       onActivate();
-      // Start drag after small delay
-      const startX = e.clientX;
-      const startY = e.clientY;
+      const startX = e.clientX,
+        startY = e.clientY;
       const onMove = (me: MouseEvent) => {
-        if (Math.abs(me.clientX - startX) > 5 || Math.abs(me.clientY - startY) > 5) {
+        if (
+          Math.abs(me.clientX - startX) > 5 ||
+          Math.abs(me.clientY - startY) > 5
+        ) {
           onDragStart();
           window.removeEventListener("mousemove", onMove);
         }
@@ -164,57 +182,53 @@ function TabItem({ tab, isActive, onActivate, onClose, onDragStart }: TabItemPro
     }
   };
 
-  const typeColors: Record<string, string> = {
-    file: "#93c5fd",
-    graph: "#6ee7b7",
-    clusterDiff: "#fca5a5",
-    clusterLogs: "#fed7aa",
-    inspector: "#ddd6fe",
-    explorer: "#bbf7d0",
-    welcome: "#e2e8f0",
-  };
-
-  const color = typeColors[tab.contentType] ?? "#94a3b8";
-
   return (
     <div
       onMouseDown={handleMouseDown}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
       style={{
         display: "flex",
         alignItems: "center",
         gap: 5,
-        padding: "0 10px 0 8px",
+        padding: "0 10px 0 9px",
         cursor: "pointer",
-        borderRight: "1px solid rgba(255,255,255,0.04)",
-        borderBottom: isActive
-          ? "2px solid rgba(96,165,250,0.8)"
-          : "2px solid transparent",
+        borderRight: "1px solid var(--border-subtle)",
+        borderBottom: isActive ? `2px solid ${color}` : "2px solid transparent",
         background: isActive
-          ? "rgba(59,130,246,0.08)"
-          : "transparent",
+          ? "var(--bg-primary)"
+          : hov
+            ? "var(--bg-sidebar-hover)"
+            : "transparent",
         minWidth: 80,
         maxWidth: 180,
         height: "100%",
         flexShrink: 0,
-        opacity: isDragSource ? 0.3 : 1,
+        opacity: isDragSrc ? 0.3 : 1,
         transition: "background 0.1s",
-        position: "relative",
-      }}
-      onMouseEnter={(e) => {
-        if (!isActive) e.currentTarget.style.background = "rgba(255,255,255,0.04)";
-      }}
-      onMouseLeave={(e) => {
-        if (!isActive) e.currentTarget.style.background = "transparent";
       }}
     >
-      {/* Icon */}
-      <span style={{ fontSize: 11, opacity: 0.7, flexShrink: 0 }}>{tab.icon ?? "◦"}</span>
-
-      {/* Title */}
+      {/* Tab type icon */}
       <span
         style={{
-          fontSize: 11,
-          color: isActive ? color : "rgba(255,255,255,0.5)",
+          color: isActive ? color : "var(--text-faint)",
+          display: "flex",
+          alignItems: "center",
+          flexShrink: 0,
+          opacity: 0.75,
+        }}
+      >
+        <AppIcon
+          name={contentTypeIcon(tab.contentType)}
+          size={11}
+          strokeWidth={1.75}
+        />
+      </span>
+
+      <span
+        style={{
+          fontSize: "var(--font-size-sm)",
+          color: isActive ? color : "var(--text-muted)",
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -224,11 +238,22 @@ function TabItem({ tab, isActive, onActivate, onClose, onDragStart }: TabItemPro
       >
         {tab.title}
         {tab.isDirty && (
-          <span style={{ color: "#f59e0b", marginLeft: 2 }}>●</span>
+          <span
+            style={{
+              color: "var(--ctp-yellow)",
+              marginLeft: 4,
+              display: "inline-block",
+              width: 5,
+              height: 5,
+              borderRadius: "50%",
+              background: "var(--ctp-yellow)",
+              verticalAlign: "middle",
+            }}
+          />
         )}
       </span>
 
-      {/* Close */}
+      {/* Close button */}
       <div
         onMouseDown={(e) => {
           e.stopPropagation();
@@ -237,63 +262,61 @@ function TabItem({ tab, isActive, onActivate, onClose, onDragStart }: TabItemPro
         style={{
           width: 14,
           height: 14,
-          borderRadius: 2,
+          borderRadius: "var(--radius-xs)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          fontSize: 9,
-          color: "rgba(255,255,255,0.25)",
+          color: "var(--text-faint)",
           flexShrink: 0,
           transition: "all 0.1s",
         }}
         onMouseEnter={(e) => {
-          e.currentTarget.style.background = "rgba(239,68,68,0.25)";
-          e.currentTarget.style.color = "#fca5a5";
+          (e.currentTarget as HTMLElement).style.background =
+            "rgba(243,139,168,0.2)";
+          (e.currentTarget as HTMLElement).style.color = "var(--ctp-red)";
         }}
         onMouseLeave={(e) => {
-          e.currentTarget.style.background = "transparent";
-          e.currentTarget.style.color = "rgba(255,255,255,0.25)";
+          (e.currentTarget as HTMLElement).style.background = "transparent";
+          (e.currentTarget as HTMLElement).style.color = "var(--text-faint)";
         }}
       >
-        ✕
+        <AppIcon name="close" size={9} strokeWidth={2.5} />
       </div>
     </div>
   );
 }
 
-// ─── DropZones ────────────────────────────────────────────────────────────────
+// ─── DropZones ────────────────────────────────────────────────────
+
+const DROP_ZONE_ICONS = {
+  center: <AppIcon name="maximize" size={16} strokeWidth={1.5} />,
+  top: <ArrowUp size={12} strokeWidth={2} />,
+  bottom: <ArrowDown size={12} strokeWidth={2} />,
+  left: <ArrowLeft size={12} strokeWidth={2} />,
+  right: <ArrowRight size={12} strokeWidth={2} />,
+} as const;
 
 function DropZones({ onDrop }: { onDrop: (pos: DropPosition) => void }) {
   const dragState = useIDEStore((s) => s.dragState);
   const endDrag = useIDEStore((s) => s.endDrag);
   const [hovering, setHovering] = useState<DropPosition | null>(null);
 
-  const positions: { pos: DropPosition; style: React.CSSProperties; label: string }[] = [
+  const positions: { pos: DropPosition; style: React.CSSProperties }[] = [
     {
       pos: "center",
-      label: "⊕",
-      style: {
-        top: "30%", left: "30%", width: "40%", height: "40%",
-      },
+      style: { top: "30%", left: "30%", width: "40%", height: "40%" },
     },
-    {
-      pos: "top",
-      label: "↑",
-      style: { top: 0, left: "20%", width: "60%", height: "28%" },
-    },
+    { pos: "top", style: { top: 0, left: "20%", width: "60%", height: "28%" } },
     {
       pos: "bottom",
-      label: "↓",
       style: { bottom: 0, left: "20%", width: "60%", height: "28%" },
     },
     {
       pos: "left",
-      label: "←",
       style: { top: "20%", left: 0, width: "28%", height: "60%" },
     },
     {
       pos: "right",
-      label: "→",
       style: { top: "20%", right: 0, width: "28%", height: "60%" },
     },
   ];
@@ -309,17 +332,15 @@ function DropZones({ onDrop }: { onDrop: (pos: DropPosition) => void }) {
         pointerEvents: "none",
       }}
     >
-      {/* dim background */}
       <div
         style={{
           position: "absolute",
           inset: 0,
-          background: "rgba(6,12,24,0.45)",
-          backdropFilter: "blur(1px)",
+          background: "rgba(17,17,27,0.5)",
+          backdropFilter: "blur(2px)",
         }}
       />
-
-      {positions.map(({ pos, style, label }) => (
+      {positions.map(({ pos, style }) => (
         <div
           key={pos}
           onMouseEnter={() => setHovering(pos)}
@@ -336,32 +357,28 @@ function DropZones({ onDrop }: { onDrop: (pos: DropPosition) => void }) {
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            borderRadius: pos === "center" ? 8 : 4,
-            border: `2px solid ${hovering === pos ? "rgba(96,165,250,0.9)" : "rgba(96,165,250,0.35)"}`,
-            background: hovering === pos
-              ? "rgba(59,130,246,0.25)"
-              : "rgba(59,130,246,0.08)",
-            transition: "all 0.12s",
+            borderRadius:
+              pos === "center" ? "var(--radius-lg)" : "var(--radius-sm)",
+            border: `2px solid ${hovering === pos ? "var(--accent)" : "rgba(203,166,247,0.3)"}`,
+            background:
+              hovering === pos
+                ? "rgba(203,166,247,0.15)"
+                : "rgba(203,166,247,0.05)",
+            transition: "all 0.12s ease",
             cursor: "copy",
-            boxShadow: hovering === pos ? "0 0 20px rgba(59,130,246,0.3)" : "none",
+            boxShadow:
+              hovering === pos ? "0 0 20px rgba(203,166,247,0.2)" : "none",
+            color: hovering === pos ? "var(--accent)" : "rgba(203,166,247,0.4)",
           }}
         >
-          <span
-            style={{
-              fontSize: pos === "center" ? 16 : 12,
-              color: hovering === pos ? "#93c5fd" : "rgba(96,165,250,0.5)",
-              fontWeight: 600,
-            }}
-          >
-            {label}
-          </span>
+          {DROP_ZONE_ICONS[pos]}
         </div>
       ))}
     </div>
   );
 }
 
-// ─── EmptyPanel ───────────────────────────────────────────────────────────────
+// ─── EmptyPanel ───────────────────────────────────────────────────
 
 function EmptyPanel() {
   return (
@@ -371,9 +388,9 @@ function EmptyPanel() {
         alignItems: "center",
         justifyContent: "center",
         height: "100%",
-        color: "rgba(255,255,255,0.12)",
-        fontSize: 13,
-        fontStyle: "italic",
+        color: "var(--text-faint)",
+        fontSize: "var(--font-size-sm)",
+        fontFamily: "var(--font-ui)",
       }}
     >
       No tabs open
