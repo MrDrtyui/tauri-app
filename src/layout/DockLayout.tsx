@@ -71,7 +71,7 @@ export function DockLayout() {
         background: "#0b1120",
         fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
         overflow: "hidden",
-        userSelect: dragState.isDragging ? "none" : undefined,
+        userSelect: "none",
       }}
     >
       {/* Top bar */}
@@ -131,9 +131,130 @@ export function DockLayout() {
 
 // ─── TitleBar ─────────────────────────────────────────────────────────────────
 
+function ViewMenu() {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+
+  const areas         = useIDEStore(s => s.areas);
+  const setAreaVisible = useIDEStore(s => s.setAreaVisible);
+  const resetLayout   = useIDEStore(s => s.resetLayout);
+  const openTab       = useIDEStore(s => s.openTab);
+
+  const left   = areas.find(a => a.slot === "left");
+  const right  = areas.find(a => a.slot === "right");
+  const bottom = areas.find(a => a.slot === "bottom");
+
+  React.useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const keyHandler = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler);
+    return () => { document.removeEventListener("mousedown", handler); document.removeEventListener("keydown", keyHandler); };
+  }, [open]);
+
+  const panels: Array<{ label: string; icon: string; slot: "left" | "right" | "bottom"; visible: boolean }> = [
+    { label: "Explorer",   icon: "📁", slot: "left",   visible: left?.visible   ?? false },
+    { label: "Properties", icon: "◈",  slot: "right",  visible: right?.visible  ?? false },
+    { label: "Bottom",     icon: "⊟",  slot: "bottom", visible: bottom?.visible ?? false },
+  ];
+
+  const openPanel = (slot: "left" | "right" | "bottom", contentType: string, title: string, icon: string) => {
+    setAreaVisible(slot, true);
+    openTab({ id: `tab-${contentType}`, title, contentType: contentType as never, icon }, slot);
+    setOpen(false);
+  };
+
+  const menuItems = [
+    { type: "toggle", label: "Explorer",     icon: "📁", slot: "left"   as const, visible: left?.visible   ?? false },
+    { type: "toggle", label: "Properties",   icon: "◈",  slot: "right"  as const, visible: right?.visible  ?? false },
+    { type: "divider" },
+    { type: "action", label: "Logs",         icon: "≡",  action: () => openPanel("bottom", "clusterLogs", "Logs", "≡") },
+    { type: "action", label: "Cluster Diff", icon: "⊞",  action: () => openPanel("bottom", "clusterDiff", "Cluster Diff", "⊞") },
+    { type: "divider" },
+    { type: "action", label: "Reset Layout", icon: "↺",  action: () => { resetLayout(); setOpen(false); } },
+  ];
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          background: open ? "rgba(255,255,255,0.08)" : "none",
+          border: "none",
+          color: open ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.45)",
+          fontSize: 11, padding: "2px 8px", cursor: "pointer", borderRadius: 3,
+          fontFamily: "monospace",
+        }}
+        onMouseEnter={e => { if (!open) e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
+        onMouseLeave={e => { if (!open) e.currentTarget.style.background = "none"; }}
+      >
+        View
+      </button>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0,
+          background: "#0f1a2e", border: "1px solid rgba(255,255,255,0.12)",
+          borderRadius: 7, padding: "4px 0", minWidth: 200,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.6)", zIndex: 9999,
+          fontFamily: "'JetBrains Mono', monospace",
+        }}>
+          {menuItems.map((item, i) => {
+            if (item.type === "divider") {
+              return <div key={i} style={{ height: 1, background: "rgba(255,255,255,0.07)", margin: "3px 0" }} />;
+            }
+            if (item.type === "toggle") {
+              return (
+                <ViewMenuItem
+                  key={item.label}
+                  icon={item.icon!}
+                  label={item.label!}
+                  checked={item.visible}
+                  onClick={() => { setAreaVisible(item.slot!, !item.visible); }}
+                />
+              );
+            }
+            return (
+              <ViewMenuItem key={item.label} icon={item.icon!} label={item.label!} onClick={item.action!} />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ViewMenuItem({ icon, label, checked, onClick }: {
+  icon: string; label: string; checked?: boolean; onClick: () => void;
+}) {
+  const [hov, setHov] = React.useState(false);
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "5px 12px 5px 10px", cursor: "pointer",
+        background: hov ? "rgba(59,130,246,0.1)" : "transparent",
+        color: hov ? "#e2e8f0" : "rgba(255,255,255,0.65)",
+        fontSize: 11, transition: "all 0.08s",
+      }}
+    >
+      {/* checkmark column */}
+      <span style={{ width: 12, fontSize: 10, color: "rgba(96,165,250,0.8)", flexShrink: 0 }}>
+        {checked === true ? "✓" : checked === false ? "" : ""}
+      </span>
+      <span style={{ width: 14, fontSize: 12, flexShrink: 0, textAlign: "center" }}>{icon}</span>
+      <span style={{ flex: 1 }}>{label}</span>
+    </div>
+  );
+}
+
 function TitleBar() {
-  const resetLayout = useIDEStore((s) => s.resetLayout);
-  const serializeLayout = useIDEStore((s) => s.serializeLayout);
   const projectPath = useIDEStore((s) => s.projectPath);
   const closeProject = useIDEStore((s) => s.closeProject);
   const projectName = projectPath?.split("/").pop() ?? "Endfield";
@@ -189,64 +310,12 @@ function TitleBar() {
         </span>
       </div>
 
-      {/* Menu items */}
+      {/* Menu bar */}
       <div style={{ display: "flex", gap: 2, marginLeft: 8 }}>
-        {["File", "View", "Layout", "Help"].map((m) => (
-          <button
-            key={m}
-            style={{
-              background: "none",
-              border: "none",
-              color: "rgba(255,255,255,0.45)",
-              fontSize: 11,
-              padding: "2px 8px",
-              cursor: "pointer",
-              borderRadius: 3,
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.06)")}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
-          >
-            {m}
-          </button>
-        ))}
+        <ViewMenu />
       </div>
 
       <div style={{ flex: 1 }} />
-
-      {/* Actions */}
-      <button
-        onClick={() => {
-          const layout = serializeLayout();
-          console.log("Layout JSON:", JSON.stringify(layout, null, 2));
-        }}
-        title="Serialize layout to console"
-        style={{
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: 4,
-          color: "rgba(255,255,255,0.35)",
-          fontSize: 10,
-          padding: "2px 8px",
-          cursor: "pointer",
-        }}
-      >
-        ⊞ Save Layout
-      </button>
-      <button
-        onClick={resetLayout}
-        title="Reset to default layout"
-        style={{
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: 4,
-          color: "rgba(255,255,255,0.35)",
-          fontSize: 10,
-          padding: "2px 8px",
-          cursor: "pointer",
-        }}
-      >
-        ↺ Reset
-      </button>
     </div>
   );
 }

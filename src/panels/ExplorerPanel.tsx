@@ -2,6 +2,9 @@ import React, { useState, useEffect } from "react";
 import { useIDEStore } from "../store/ideStore";
 import { YamlNode, saveYamlFile, kubectlApply, helmTemplate } from "../store/tauriStore";
 import { genId } from "../layout/utils";
+import { ContextMenu, ContextMenuState } from "../components/ContextMenu";
+import { DeleteConfirmDialog } from "../components/DeleteConfirmDialog";
+import { executeCommand } from "../commands/commands";
 
 // ─── Color/icon maps ──────────────────────────────────────────────────────────
 
@@ -368,13 +371,19 @@ function FileTreeView({
 
 // ─── FieldSection ─────────────────────────────────────────────────────────────
 
-function FieldSection({ label, fields, expanded, onToggle, selectedId, onFieldClick }: {
+function FieldSection({ label, fields, expanded, onToggle, selectedId, onFieldClick, onFieldRightClick, renamingId, renameValue, onRenameChange, onRenameCommit, onRenameCancel }: {
   label: string;
   fields: YamlNode[];
   expanded: boolean;
   onToggle: () => void;
   selectedId: string | null;
   onFieldClick: (n: YamlNode) => void;
+  onFieldRightClick: (e: React.MouseEvent, n: YamlNode) => void;
+  renamingId: string | null;
+  renameValue: string;
+  onRenameChange: (v: string) => void;
+  onRenameCommit: () => void;
+  onRenameCancel: () => void;
 }) {
   return (
     <>
@@ -390,12 +399,14 @@ function FieldSection({ label, fields, expanded, onToggle, selectedId, onFieldCl
       </div>
       {expanded && fields.map(node => {
         const color = TYPE_COLOR[node.type_id] ?? "#475569";
-        const icon = TYPE_ICON[node.type_id] ?? "◇";
+        const icon  = TYPE_ICON[node.type_id] ?? "◇";
         const isSel = selectedId === node.id;
+        const isRenaming = renamingId === node.id;
         return (
           <div
             key={node.id}
-            onClick={() => onFieldClick(node)}
+            onClick={() => !isRenaming && onFieldClick(node)}
+            onContextMenu={e => onFieldRightClick(e, node)}
             style={{
               display:"flex", alignItems:"center", gap:6, padding:"4px 8px 4px 20px",
               cursor:"pointer",
@@ -407,9 +418,29 @@ function FieldSection({ label, fields, expanded, onToggle, selectedId, onFieldCl
           >
             <span style={{ fontSize:12, color, flexShrink:0 }}>{icon}</span>
             <div style={{ flex:1, minWidth:0 }}>
-              <div style={{ color: isSel ? "#e2e8f0" : "rgba(255,255,255,0.6)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                {node.label}
-              </div>
+              {isRenaming ? (
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={e => onRenameChange(e.target.value)}
+                  onBlur={onRenameCommit}
+                  onKeyDown={e => {
+                    if (e.key === "Enter") { e.preventDefault(); onRenameCommit(); }
+                    if (e.key === "Escape") { e.preventDefault(); onRenameCancel(); }
+                    e.stopPropagation();
+                  }}
+                  onClick={e => e.stopPropagation()}
+                  style={{
+                    background:"rgba(255,255,255,0.08)", border:"1px solid rgba(255,255,255,0.2)",
+                    borderRadius:3, color:"white", fontSize:11, fontFamily:"monospace",
+                    width:"100%", outline:"none", padding:"1px 4px",
+                  }}
+                />
+              ) : (
+                <div style={{ color: isSel ? "#e2e8f0" : "rgba(255,255,255,0.6)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                  {node.label}
+                </div>
+              )}
               <div style={{ color:"rgba(255,255,255,0.22)", fontSize:9, marginTop:1 }}>
                 {node.kind} · {node.namespace}
               </div>
@@ -431,10 +462,15 @@ export function ExplorerPanel() {
   const [expandedSecs, setExpandedSecs] = useState({ services: true, infra: true });
   const [showAdd, setShowAdd] = useState(false);
   const [search, setSearch] = useState("");
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<YamlNode | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const nodes        = useIDEStore(s => s.nodes);
   const projectPath  = useIDEStore(s => s.projectPath);
   const addNode      = useIDEStore(s => s.addNode);
+  const renameNode   = useIDEStore(s => s.renameNode);
   const openTab      = useIDEStore(s => s.openTab);
   const setSelected  = useIDEStore(s => s.setSelectedEntity);
   const selected     = useIDEStore(s => s.selectedEntity);
@@ -461,6 +497,24 @@ export function ExplorerPanel() {
     if (node.file_path) {
       openTab({ id:`file-${node.file_path}`, title:node.file_path.split("/").pop() ?? node.label, contentType:"file", filePath:node.file_path, icon: node.source==="helm" ? "⛵" : "📄" }, "center");
     }
+  };
+
+  const handleFieldRightClick = (e: React.MouseEvent, node: YamlNode) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ node, x: e.clientX, y: e.clientY });
+  };
+
+  const startRename = (node: YamlNode) => {
+    setRenamingId(node.id);
+    setRenameValue(node.label);
+  };
+
+  const commitRename = () => {
+    if (renamingId && renameValue.trim()) {
+      renameNode(renamingId, renameValue.trim());
+    }
+    setRenamingId(null);
   };
 
   const q = search.toLowerCase();
@@ -533,6 +587,12 @@ export function ExplorerPanel() {
               onToggle={() => setExpandedSecs(s => ({ ...s, services:!s.services }))}
               selectedId={selected?.type==="field" ? selected.id : null}
               onFieldClick={handleFieldClick}
+              onFieldRightClick={handleFieldRightClick}
+              renamingId={renamingId}
+              renameValue={renameValue}
+              onRenameChange={setRenameValue}
+              onRenameCommit={commitRename}
+              onRenameCancel={() => setRenamingId(null)}
             />
             <FieldSection
               label="Infrastructure"
@@ -541,6 +601,12 @@ export function ExplorerPanel() {
               onToggle={() => setExpandedSecs(s => ({ ...s, infra:!s.infra }))}
               selectedId={selected?.type==="field" ? selected.id : null}
               onFieldClick={handleFieldClick}
+              onFieldRightClick={handleFieldRightClick}
+              renamingId={renamingId}
+              renameValue={renameValue}
+              onRenameChange={setRenameValue}
+              onRenameCommit={commitRename}
+              onRenameCancel={() => setRenamingId(null)}
             />
           </>
         )}
@@ -551,6 +617,22 @@ export function ExplorerPanel() {
           projectPath={projectPath}
           onAdd={node => { addNode(node); setShowAdd(false); }}
           onClose={() => setShowAdd(false)}
+        />
+      )}
+
+      {contextMenu && (
+        <ContextMenu
+          state={contextMenu}
+          onClose={() => setContextMenu(null)}
+          onRename={node => { startRename(node); setContextMenu(null); }}
+          onDelete={node => { setDeleteTarget(node); setContextMenu(null); }}
+        />
+      )}
+
+      {deleteTarget && (
+        <DeleteConfirmDialog
+          node={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
         />
       )}
     </div>

@@ -6,32 +6,17 @@ const explorerGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-explorer",
   tabs: [
-    {
-      id: "tab-explorer",
-      title: "Explorer",
-      contentType: "explorer",
-      icon: "📁",
-    },
+    { id: "tab-explorer", title: "Explorer", contentType: "explorer", icon: "📁" },
   ],
   activeTabId: "tab-explorer",
 };
 
+// Schema-first: only the Schema/Graph tab in center on startup
 const centerGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-center",
   tabs: [
-    {
-      id: "tab-welcome",
-      title: "Welcome",
-      contentType: "welcome",
-      icon: "✦",
-    },
-    {
-      id: "tab-graph",
-      title: "Graph",
-      contentType: "graph",
-      icon: "⬡",
-    },
+    { id: "tab-graph", title: "Schema", contentType: "graph", icon: "⬡" },
   ],
   activeTabId: "tab-graph",
 };
@@ -40,12 +25,7 @@ const inspectorGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-inspector",
   tabs: [
-    {
-      id: "tab-inspector",
-      title: "Inspector",
-      contentType: "inspector",
-      icon: "◈",
-    },
+    { id: "tab-inspector", title: "Properties", contentType: "inspector", icon: "◈" },
   ],
   activeTabId: "tab-inspector",
 };
@@ -54,51 +34,34 @@ const bottomGroup: TabGroupNode = {
   type: "tabgroup",
   id: "tg-bottom",
   tabs: [
-    {
-      id: "tab-diff",
-      title: "Cluster Diff",
-      contentType: "clusterDiff",
-      icon: "⊞",
-    },
-    {
-      id: "tab-logs",
-      title: "Logs",
-      contentType: "clusterLogs",
-      icon: "≡",
-    },
+    { id: "tab-diff",  title: "Cluster Diff", contentType: "clusterDiff",  icon: "⊞" },
+    { id: "tab-logs",  title: "Logs",         contentType: "clusterLogs",  icon: "≡" },
   ],
   activeTabId: "tab-diff",
 };
 
-// ─── Default workspace layout ─────────────────────────────────────────────────
+// ─── Schema-first workspace layout ───────────────────────────────────────────
 
 export const DEFAULT_LAYOUT: WorkspaceLayout = {
   version: 1,
   areas: [
-    {
-      slot: "left",
-      size: 260,
-      visible: true,
-      root: explorerGroup,
-    },
-    {
-      slot: "center",
-      size: 0, // fills remaining space
-      visible: true,
-      root: centerGroup,
-    },
-    {
-      slot: "right",
-      size: 300,
-      visible: true,
-      root: inspectorGroup,
-    },
-    {
-      slot: "bottom",
-      size: 220,
-      visible: true,
-      root: bottomGroup,
-    },
+    { slot: "left",   size: 260, visible: true,  root: explorerGroup  },
+    { slot: "center", size: 0,   visible: true,  root: centerGroup    },
+    { slot: "right",  size: 300, visible: true,  root: inspectorGroup },
+    { slot: "bottom", size: 220, visible: false, root: bottomGroup    },
+  ],
+};
+
+// ─── Graph-only layout (used when opening a project) ─────────────────────────
+// All side panels hidden — user sees only the Schema graph.
+
+export const GRAPH_ONLY_LAYOUT: WorkspaceLayout = {
+  version: 1,
+  areas: [
+    { slot: "left",   size: 260, visible: false, root: explorerGroup  },
+    { slot: "center", size: 0,   visible: true,  root: centerGroup    },
+    { slot: "right",  size: 300, visible: false, root: inspectorGroup },
+    { slot: "bottom", size: 220, visible: false, root: bottomGroup    },
   ],
 };
 

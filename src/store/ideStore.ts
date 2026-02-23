@@ -24,7 +24,7 @@ import {
   dropPositionToSplit,
   splitGroupNode,
 } from "../layout/utils";
-import { DEFAULT_LAYOUT } from "../mock/defaultLayout";
+import { DEFAULT_LAYOUT, GRAPH_ONLY_LAYOUT } from "../mock/defaultLayout";
 import {
   YamlNode,
   ClusterStatus,
@@ -53,6 +53,7 @@ interface IDEStore {
   updateNodePosition: (id: string, x: number, y: number) => void;
   addNode: (node: YamlNode) => void;
   removeNode: (id: string) => void;
+  renameNode: (id: string, newName: string) => void;
   refreshClusterStatus: () => Promise<void>;
 
   // ── Tab actions ──────────────────────────────────────────────────────────────
@@ -166,7 +167,8 @@ export const useIDEStore = create<IDEStore>()(
     setProject: async (result: ScanResult) => {
       const layout = await loadEndfieldLayout(result.project_path);
       const nodes = applyLayoutToNodes(result.nodes, layout);
-      set({ projectPath: result.project_path, nodes });
+      // Open project with graph-only view — user opens panels via View menu
+      set({ projectPath: result.project_path, nodes, areas: GRAPH_ONLY_LAYOUT.areas });
     },
 
     closeProject: () => {
@@ -208,6 +210,12 @@ export const useIDEStore = create<IDEStore>()(
 
     removeNode: (id: string) => {
       set((state) => ({ nodes: state.nodes.filter((n) => n.id !== id) }));
+    },
+
+    renameNode: (id: string, newName: string) => {
+      set((state) => ({
+        nodes: state.nodes.map((n) => n.id === id ? { ...n, label: newName } : n),
+      }));
     },
 
     refreshClusterStatus: async () => {

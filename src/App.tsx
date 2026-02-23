@@ -14,6 +14,9 @@ const GLOBAL_STYLES = `
   * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent; }
   @keyframes fadeIn { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: scale(1); } }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* Prevent text selection during drag operations */
+  .dock-layout, .dock-layout * { user-select: none; -webkit-user-select: none; }
+  .dock-layout input, .dock-layout textarea { user-select: text; -webkit-user-select: text; }
 `;
 
 export default function App() {
