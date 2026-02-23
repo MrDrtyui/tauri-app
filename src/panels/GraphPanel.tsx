@@ -3,6 +3,7 @@ import { useIDEStore } from "../store/ideStore";
 import { YamlNode } from "../store/tauriStore";
 import { ContextMenu, ContextMenuState } from "../components/ContextMenu";
 import { DeleteConfirmDialog } from "../components/DeleteConfirmDialog";
+import { AddFieldModal } from "../components/AddFieldModal";
 import { executeCommand } from "../commands/commands";
 
 const NODE_TYPES: Record<string, { bg: string; border: string; color: string; shadow: string; accent: string; icon: string }> = {
@@ -26,6 +27,7 @@ function StatusDot({ status }: { status: string }) {
 export function GraphPanel() {
   const storeNodes           = useIDEStore(s => s.nodes);
   const clusterStatus        = useIDEStore(s => s.clusterStatus);
+  const projectPath          = useIDEStore(s => s.projectPath);
   const updateNodePosition   = useIDEStore(s => s.updateNodePosition);
   const setSelectedEntity    = useIDEStore(s => s.setSelectedEntity);
   const renameNode           = useIDEStore(s => s.renameNode);
@@ -38,6 +40,10 @@ export function GraphPanel() {
   const [deleteTarget, setDeleteTarget]       = useState<YamlNode | null>(null);
   const [renamingId, setRenamingId]           = useState<string | null>(null);
   const [renameValue, setRenameValue]         = useState("");
+  const [showAddField, setShowAddField]       = useState(false);
+
+  // Derive namespace from existing nodes, fallback to "default"
+  const namespace = storeNodes[0]?.namespace ?? "default";
 
   const canvasRef   = useRef<HTMLDivElement>(null);
   const fittedRef   = useRef(false);
@@ -183,6 +189,17 @@ export function GraphPanel() {
 
       {/* Toolbar */}
       <div style={{ position:"absolute", top:10, right:10, zIndex:10, display:"flex", gap:4 }}>
+        {projectPath && (
+          <button
+            onClick={() => setShowAddField(true)}
+            title="Add Field"
+            style={{ height:28, padding:"0 10px", background:"rgba(59,130,246,0.18)", border:"1px solid rgba(96,165,250,0.4)", borderRadius:5, color:"#93c5fd", cursor:"pointer", fontSize:11, display:"flex", alignItems:"center", gap:5, backdropFilter:"blur(8px)", fontFamily:"monospace", fontWeight:600 }}
+            onMouseEnter={e => (e.currentTarget.style.background = "rgba(59,130,246,0.28)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "rgba(59,130,246,0.18)")}
+          >
+            <span style={{ fontSize:14, lineHeight:1 }}>+</span> Add Field
+          </button>
+        )}
         {[
           { l:"⊡", t:"Fit view",  a: fitView },
           { l:"+", t:"Zoom in",   a: () => setZoom(z => Math.min(3, z*1.2)) },
@@ -280,6 +297,14 @@ export function GraphPanel() {
         <DeleteConfirmDialog
           node={deleteTarget}
           onClose={() => setDeleteTarget(null)}
+        />
+      )}
+
+      {/* Add Field Modal */}
+      {showAddField && (
+        <AddFieldModal
+          namespace={namespace}
+          onClose={() => setShowAddField(false)}
         />
       )}
     </div>

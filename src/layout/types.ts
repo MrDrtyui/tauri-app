@@ -7,7 +7,8 @@ export type TabContentType =
   | "clusterLogs"
   | "inspector"
   | "explorer"
-  | "welcome";
+  | "welcome"
+  | "deployImage";
 
 export interface Tab {
   id: string;

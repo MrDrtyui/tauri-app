@@ -7,6 +7,7 @@ import { InspectorPanel } from "../panels/InspectorPanel";
 import { ClusterDiffPanel } from "../panels/ClusterDiffPanel";
 import { ClusterLogsPanel } from "../panels/ClusterLogsPanel";
 import { WelcomePanel } from "../panels/WelcomePanel";
+import { DeployImagePanel } from "../panels/DeployImagePanel";
 
 interface PanelRendererProps {
   tab: Tab;
@@ -29,6 +30,8 @@ export function PanelRenderer({ tab, groupId }: PanelRendererProps) {
       return <ClusterLogsPanel />;
     case "welcome":
       return <WelcomePanel />;
+    case "deployImage":
+      return <DeployImagePanel />;
     default:
       return (
         <div

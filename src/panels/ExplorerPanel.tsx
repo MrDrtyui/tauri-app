@@ -556,6 +556,15 @@ export function ExplorerPanel() {
             +
           </button>
         )}
+        {projectPath && (
+          <button
+            title="Deploy Image"
+            onClick={() => openTab({ id:"tab-deploy-image", title:"Deploy Image", contentType:"deployImage", icon:"🚀" }, "center")}
+            style={{ background:"rgba(16,185,129,0.12)", border:"1px solid rgba(52,211,153,0.25)", borderRadius:4, color:"#6ee7b7", fontSize:11, padding:"2px 8px", cursor:"pointer", fontFamily:"monospace", flexShrink:0, whiteSpace:"nowrap" }}
+          >
+            🚀
+          </button>
+        )}
       </div>
 
       {/* Content */}

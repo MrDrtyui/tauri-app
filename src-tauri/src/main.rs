@@ -2,11 +2,94 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri_plugin_dialog::DialogExt;
 
-// ─── Structs ──────────────────────────────────────────────────────────────────
+// ─── Core Domain Types ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FieldConfig {
+    /// Unique identifier, also used as the Kubernetes resource name
+    pub id: String,
+    /// Human-readable display name
+    pub label: String,
+    /// Target namespace. If empty — auto-created from project name + label
+    pub namespace: String,
+    /// Docker image, e.g. "myorg/api:latest"
+    pub image: String,
+    /// Number of replicas
+    pub replicas: u32,
+    /// Port the container listens on
+    pub port: u32,
+    /// Optional environment variables (key=value pairs)
+    pub env: Vec<EnvVar>,
+    /// Absolute path to the project root
+    pub project_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InfraConfig {
+    /// Unique id / Helm release name
+    pub id: String,
+    pub label: String,
+    /// "helm" | "raw"
+    pub source: String,
+    /// Optional namespace. Cluster-level infra may omit this.
+    pub namespace: Option<String>,
+    /// Helm-specific fields
+    pub helm: Option<HelmInfraConfig>,
+    /// Raw YAML path (relative to project_path/infra/)
+    pub raw_yaml_path: Option<String>,
+    pub project_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HelmInfraConfig {
+    pub repo_name: String,
+    pub repo_url: String,
+    pub chart_name: String,
+    pub chart_version: String,
+    /// Path to values override file, relative to project_path
+    pub values_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GenerateResult {
+    pub generated_files: Vec<String>,
+    pub namespace_created: bool,
+    pub namespace: String,
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeployResult {
+    pub resource_id: String,
+    pub namespace: String,
+    pub source: String, // "helm" | "raw"
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+    /// Shell commands that were actually executed
+    pub commands_run: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiffResult {
+    pub resource_id: String,
+    pub diff: String,
+    pub has_changes: bool,
+    pub error: Option<String>,
+}
+
+// ─── Existing Types (unchanged) ───────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HelmNodeMeta {
@@ -31,7 +114,6 @@ pub struct YamlNode {
     pub replicas: Option<u32>,
     pub source: String,
     pub helm: Option<HelmNodeMeta>,
-    // Layout positions
     pub x: f64,
     pub y: f64,
     pub group_x: Option<f64>,
@@ -114,6 +196,40 @@ fn run_helm(args: &[&str], cwd: &Path) -> Result<String, String> {
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
+}
+
+fn run_kubectl_output(args: &[&str]) -> (String, String, bool) {
+    match Command::new("kubectl").args(args).output() {
+        Ok(out) => (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.success(),
+        ),
+        Err(e) => (String::new(), format!("kubectl not found: {}", e), false),
+    }
+}
+
+fn run_helm_output(args: &[&str], cwd: &Path) -> (String, String, bool) {
+    match Command::new("helm").args(args).current_dir(cwd).output() {
+        Ok(out) => (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.success(),
+        ),
+        Err(e) => (String::new(), format!("helm not found: {}", e), false),
+    }
+}
+
+/// Ensure namespace exists in the cluster. Returns true if it had to be created.
+fn ensure_namespace(namespace: &str) -> Result<bool, String> {
+    // Check if namespace already exists
+    let check = run_kubectl(&["get", "namespace", namespace]);
+    if check.is_ok() {
+        return Ok(false);
+    }
+    // Create it
+    run_kubectl(&["create", "namespace", namespace])?;
+    Ok(true)
 }
 
 fn parse_ready(s: &str) -> (u32, u32) {
@@ -594,7 +710,190 @@ fn split_rendered_manifests(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-// ─── Patch replicas in YAML file ──────────────────────────────────────────────
+// ─── YAML code generators ─────────────────────────────────────────────────────
+
+fn generate_deployment_yaml(cfg: &FieldConfig) -> String {
+    let env_block = if cfg.env.is_empty() {
+        String::new()
+    } else {
+        let vars: String = cfg.env.iter().map(|e| {
+            format!("        - name: {}\n          value: \"{}\"\n", e.key, e.value)
+        }).collect();
+        format!("        env:\n{}", vars)
+    };
+
+    format!(
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  namespace: {ns}
+  labels:
+    app: {name}
+    managed-by: endfield
+spec:
+  replicas: {replicas}
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      containers:
+        - name: {name}
+          image: {image}
+          ports:
+            - containerPort: {port}
+{env}          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+"#,
+        name = cfg.id,
+        ns = cfg.namespace,
+        replicas = cfg.replicas,
+        image = cfg.image,
+        port = cfg.port,
+        env = env_block,
+    )
+}
+
+fn generate_service_yaml(cfg: &FieldConfig) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Service
+metadata:
+  name: {name}
+  namespace: {ns}
+  labels:
+    app: {name}
+    managed-by: endfield
+spec:
+  selector:
+    app: {name}
+  ports:
+    - protocol: TCP
+      port: {port}
+      targetPort: {port}
+  type: ClusterIP
+"#,
+        name = cfg.id,
+        ns = cfg.namespace,
+        port = cfg.port,
+    )
+}
+
+fn generate_configmap_yaml(cfg: &FieldConfig) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {name}-config
+  namespace: {ns}
+  labels:
+    app: {name}
+    managed-by: endfield
+data:
+  # Add your configuration here
+  APP_PORT: "{port}"
+"#,
+        name = cfg.id,
+        ns = cfg.namespace,
+        port = cfg.port,
+    )
+}
+
+fn generate_namespace_yaml(namespace: &str) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {ns}
+  labels:
+    managed-by: endfield
+"#,
+        ns = namespace,
+    )
+}
+
+fn generate_helm_chart_yaml(cfg: &InfraConfig, helm: &HelmInfraConfig) -> String {
+    format!(
+        r#"apiVersion: v2
+name: {id}
+description: Endfield managed Helm release for {label}
+type: application
+version: 0.1.0
+dependencies:
+  - name: {chart}
+    version: "{version}"
+    repository: "{repo}"
+"#,
+        id = cfg.id,
+        label = cfg.label,
+        chart = helm.chart_name,
+        version = helm.chart_version,
+        repo = helm.repo_url,
+    )
+}
+
+fn generate_helm_values_yaml(cfg: &InfraConfig, helm: &HelmInfraConfig) -> String {
+    let chart = helm.chart_name.to_lowercase();
+    if chart.contains("redis") {
+        return r#"redis:
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+  replica:
+    replicaCount: 0
+    persistence:
+      enabled: false
+"#.to_string();
+    }
+    if chart.contains("kafka") {
+        return r#"kafka:
+  replicaCount: 1
+  persistence:
+    enabled: false
+  kraft:
+    enabled: true
+  zookeeper:
+    persistence:
+      enabled: false
+"#.to_string();
+    }
+    if chart.contains("postgres") || chart.contains("postgresql") {
+        return r#"postgresql:
+  primary:
+    persistence:
+      enabled: false
+  auth:
+    postgresPassword: "changeme"
+    database: "app"
+"#.to_string();
+    }
+    format!(
+        r#"# Values for {chart} - {label}
+# Generated by Endfield. Edit as needed.
+{chart}:
+  # replicaCount: 1
+  # persistence:
+  #   enabled: false
+  #   size: 8Gi
+"#,
+        chart = helm.chart_name,
+        label = cfg.label,
+    )
+}
+
+// ─── Patch replicas ────────────────────────────────────────────────────────────
 
 fn patch_replicas_in_file(
     file_path: &str,
@@ -642,7 +941,7 @@ fn patch_replicas_in_file(
         .map_err(|e| format!("Cannot write {}: {}", file_path, e))
 }
 
-// ─── .endfield layout ────────────────────────────────────────────────────────
+// ─── .endfield layout ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FieldLayoutEntry {
@@ -687,7 +986,602 @@ fn load_endfield_layout(project_path: String) -> Result<EndfieldLayout, String> 
     serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))
 }
 
-// ─── Tauri commands ───────────────────────────────────────────────────────────
+// ─── NEW: Generate Field ───────────────────────────────────────────────────────
+
+/// Generate manifests for a new Field (app/service) and write them to disk.
+/// Does NOT deploy — call deploy_resource() after reviewing.
+///
+/// Directory layout created:
+///   <project_path>/apps/<field_id>/
+///     namespace.yaml        (only if namespace is new)
+///     deployment.yaml
+///     service.yaml
+///     configmap.yaml
+#[tauri::command]
+fn generate_field(mut config: FieldConfig) -> GenerateResult {
+    let mut generated_files: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Auto-derive namespace if empty
+    if config.namespace.is_empty() {
+        let project_name = Path::new(&config.project_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project");
+        config.namespace = format!("{}-{}", project_name, config.id);
+    }
+
+    let field_dir = Path::new(&config.project_path)
+        .join("apps")
+        .join(&config.id);
+
+    // Create directory
+    if let Err(e) = fs::create_dir_all(&field_dir) {
+        return GenerateResult {
+            generated_files,
+            namespace_created: false,
+            namespace: config.namespace,
+            warnings,
+            error: Some(format!("Cannot create directory {}: {}", field_dir.display(), e)),
+        };
+    }
+
+    // Write namespace.yaml
+    let ns_path = field_dir.join("namespace.yaml");
+    let ns_yaml = generate_namespace_yaml(&config.namespace);
+    if let Err(e) = fs::write(&ns_path, &ns_yaml) {
+        return GenerateResult {
+            generated_files,
+            namespace_created: false,
+            namespace: config.namespace,
+            warnings,
+            error: Some(format!("Cannot write namespace.yaml: {}", e)),
+        };
+    }
+    generated_files.push(ns_path.to_string_lossy().to_string());
+
+    // Write deployment.yaml
+    let deploy_path = field_dir.join("deployment.yaml");
+    let deploy_yaml = generate_deployment_yaml(&config);
+    if let Err(e) = fs::write(&deploy_path, &deploy_yaml) {
+        warnings.push(format!("Cannot write deployment.yaml: {}", e));
+    } else {
+        generated_files.push(deploy_path.to_string_lossy().to_string());
+    }
+
+    // Write service.yaml
+    let svc_path = field_dir.join("service.yaml");
+    let svc_yaml = generate_service_yaml(&config);
+    if let Err(e) = fs::write(&svc_path, &svc_yaml) {
+        warnings.push(format!("Cannot write service.yaml: {}", e));
+    } else {
+        generated_files.push(svc_path.to_string_lossy().to_string());
+    }
+
+    // Write configmap.yaml
+    let cm_path = field_dir.join("configmap.yaml");
+    let cm_yaml = generate_configmap_yaml(&config);
+    if let Err(e) = fs::write(&cm_path, &cm_yaml) {
+        warnings.push(format!("Cannot write configmap.yaml: {}", e));
+    } else {
+        generated_files.push(cm_path.to_string_lossy().to_string());
+    }
+
+    GenerateResult {
+        generated_files,
+        namespace_created: true, // file was written; actual cluster create happens on deploy
+        namespace: config.namespace,
+        warnings,
+        error: None,
+    }
+}
+
+// ─── NEW: Generate Infra ──────────────────────────────────────────────────────
+
+/// Generate manifests or Helm scaffold for an Infrastructure component.
+///
+/// For Helm:
+///   <project_path>/infra/<infra_id>/
+///     namespace.yaml
+///     helm/Chart.yaml
+///     helm/values.yaml
+///     rendered/           (empty, populated on helm_template)
+///
+/// For Raw:
+///   Files are expected to exist already — this command just validates structure.
+#[tauri::command]
+fn generate_infra(config: InfraConfig) -> GenerateResult {
+    let mut generated_files: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    let namespace = config
+        .namespace
+        .clone()
+        .unwrap_or_else(|| format!("infra-{}", config.id));
+
+    let infra_dir = Path::new(&config.project_path)
+        .join("infra")
+        .join(&config.id);
+
+    if let Err(e) = fs::create_dir_all(&infra_dir) {
+        return GenerateResult {
+            generated_files,
+            namespace_created: false,
+            namespace,
+            warnings,
+            error: Some(format!("Cannot create directory {}: {}", infra_dir.display(), e)),
+        };
+    }
+
+    // Write namespace.yaml
+    let ns_path = infra_dir.join("namespace.yaml");
+    let ns_yaml = generate_namespace_yaml(&namespace);
+    if let Err(e) = fs::write(&ns_path, &ns_yaml) {
+        return GenerateResult {
+            generated_files,
+            namespace_created: false,
+            namespace,
+            warnings,
+            error: Some(format!("Cannot write namespace.yaml: {}", e)),
+        };
+    }
+    generated_files.push(ns_path.to_string_lossy().to_string());
+
+    if config.source == "helm" {
+        let helm = match &config.helm {
+            Some(h) => h.clone(),
+            None => {
+                return GenerateResult {
+                    generated_files,
+                    namespace_created: false,
+                    namespace,
+                    warnings,
+                    error: Some("source=helm but helm config is missing".to_string()),
+                }
+            }
+        };
+
+        let helm_dir = infra_dir.join("helm");
+        if let Err(e) = fs::create_dir_all(&helm_dir) {
+            return GenerateResult {
+                generated_files,
+                namespace_created: false,
+                namespace,
+                warnings,
+                error: Some(format!("Cannot create helm/: {}", e)),
+            };
+        }
+
+        // Write Chart.yaml
+        let chart_path = helm_dir.join("Chart.yaml");
+        let chart_yaml = generate_helm_chart_yaml(&config, &helm);
+        if let Err(e) = fs::write(&chart_path, &chart_yaml) {
+            warnings.push(format!("Cannot write Chart.yaml: {}", e));
+        } else {
+            generated_files.push(chart_path.to_string_lossy().to_string());
+        }
+
+        // Write values.yaml (only if no custom values_path provided)
+        if helm.values_path.is_none() {
+            let values_path = helm_dir.join("values.yaml");
+            let values_yaml = generate_helm_values_yaml(&config, &helm);
+            if let Err(e) = fs::write(&values_path, &values_yaml) {
+                warnings.push(format!("Cannot write values.yaml: {}", e));
+            } else {
+                generated_files.push(values_path.to_string_lossy().to_string());
+            }
+        }
+
+        // Create rendered/ placeholder
+        let rendered_dir = infra_dir.join("rendered");
+        if let Err(e) = fs::create_dir_all(&rendered_dir) {
+            warnings.push(format!("Cannot create rendered/: {}", e));
+        } else {
+            // .gitkeep so the directory is tracked by git
+            let gitkeep = rendered_dir.join(".gitkeep");
+            let _ = fs::write(&gitkeep, "");
+            generated_files.push(rendered_dir.to_string_lossy().to_string());
+        }
+    } else {
+        // Raw YAML — validate that a yaml file exists
+        if let Some(raw_path) = &config.raw_yaml_path {
+            let full = Path::new(&config.project_path).join(raw_path);
+            if !full.exists() {
+                warnings.push(format!(
+                    "Raw YAML path does not exist: {}",
+                    full.display()
+                ));
+            }
+        } else {
+            warnings.push("source=raw but raw_yaml_path is not provided".to_string());
+        }
+    }
+
+    GenerateResult {
+        generated_files,
+        namespace_created: true,
+        namespace,
+        warnings,
+        error: None,
+    }
+}
+
+// ─── NEW: Deploy Resource ─────────────────────────────────────────────────────
+
+/// Deploy a resource to the cluster.
+///
+/// For source="helm":
+///   1. helm repo add <repo_name> <repo_url>       (if repo_url is set)
+///   2. helm dependency update <helm_dir>
+///   3. helm template → write to rendered/
+///   4. helm upgrade --install ...
+///
+/// For source="raw":
+///   1. kubectl apply -f <dir>  (entire field/infra dir)
+///
+/// Namespace is always ensured before deploy.
+#[tauri::command]
+async fn deploy_resource(
+    resource_id: String,
+    source: String,
+    resource_dir: String,
+    namespace: String,
+    helm_release: Option<String>,
+    helm_repo_name: Option<String>,
+    helm_repo_url: Option<String>,
+    values_file: Option<String>,
+) -> DeployResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        deploy_resource_inner(resource_id, source, resource_dir, namespace,
+            helm_release, helm_repo_name, helm_repo_url, values_file)
+    }).await.unwrap_or_else(|e| DeployResult {
+        resource_id: String::new(), namespace: String::new(),
+        source: String::new(), stdout: String::new(),
+        stderr: format!("spawn error: {}", e),
+        success: false, commands_run: vec![],
+    })
+}
+
+fn deploy_resource_inner(
+    resource_id: String,
+    source: String,
+    resource_dir: String,
+    namespace: String,
+    helm_release: Option<String>,
+    helm_repo_name: Option<String>,
+    helm_repo_url: Option<String>,
+    values_file: Option<String>,
+) -> DeployResult {
+    let mut commands_run: Vec<String> = Vec::new();
+    let dir = Path::new(&resource_dir);
+
+    // Ensure namespace exists in cluster
+    match ensure_namespace(&namespace) {
+        Ok(_created) => {
+            commands_run.push(format!(
+                "kubectl get namespace {} || kubectl create namespace {}",
+                namespace, namespace
+            ));
+        }
+        Err(e) => {
+            return DeployResult {
+                resource_id,
+                namespace,
+                source,
+                stdout: String::new(),
+                stderr: e.clone(),
+                success: false,
+                commands_run,
+            };
+        }
+    }
+
+    if source == "helm" {
+        let helm_dir = dir.join("helm");
+        let release = helm_release.unwrap_or_else(|| resource_id.clone());
+        let values_path = values_file.unwrap_or_else(|| {
+            helm_dir.join("values.yaml").to_string_lossy().to_string()
+        });
+
+        // Step 1: helm repo add (if repo_url provided)
+        if let (Some(repo_name), Some(repo_url)) = (&helm_repo_name, &helm_repo_url) {
+            let repo_add_cmd = format!("helm repo add {} {}", repo_name, repo_url);
+            commands_run.push(repo_add_cmd);
+            // Not fatal — repo might already exist
+            let _ = run_helm(&["repo", "add", repo_name, repo_url], dir);
+            let _ = run_helm(&["repo", "update"], dir);
+            commands_run.push("helm repo update".to_string());
+        }
+
+        // Step 2: helm dependency update
+        let dep_cmd = format!("helm dependency update {}", helm_dir.display());
+        commands_run.push(dep_cmd);
+        if let Err(e) = run_helm(&["dependency", "update", "."], &helm_dir) {
+            return DeployResult {
+                resource_id,
+                namespace,
+                source,
+                stdout: String::new(),
+                stderr: format!("helm dependency update failed: {}", e),
+                success: false,
+                commands_run,
+            };
+        }
+
+        // Step 3: helm template → rendered/
+        let template_cmd = format!(
+            "helm template {} . --namespace {} --values {} --include-crds",
+            release, namespace, values_path
+        );
+        commands_run.push(template_cmd);
+        match run_helm(
+            &[
+                "template", &release, ".",
+                "--namespace", &namespace,
+                "--values", &values_path,
+                "--include-crds",
+            ],
+            &helm_dir,
+        ) {
+            Ok(raw) => {
+                let rendered_dir = dir.join("rendered");
+                let _ = fs::create_dir_all(&rendered_dir);
+                // Clear old rendered files
+                if let Ok(entries) = fs::read_dir(&rendered_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.file_name().and_then(|n| n.to_str()) != Some(".gitkeep") {
+                            let _ = fs::remove_file(&p);
+                        }
+                    }
+                }
+                for (filename, content) in split_rendered_manifests(&raw) {
+                    let _ = fs::write(rendered_dir.join(&filename), content);
+                }
+            }
+            Err(e) => {
+                // Non-fatal — warn but continue to install
+                eprintln!("helm template warning: {}", e);
+            }
+        }
+
+        // Step 4: helm upgrade --install (no --wait — returns immediately, cluster deploys async)
+        let install_cmd = format!(
+            "helm upgrade --install {} . --namespace {} --create-namespace --values {} --atomic=false",
+            release, namespace, values_path
+        );
+        commands_run.push(install_cmd);
+        let (stdout, stderr, success) = run_helm_output(
+            &[
+                "upgrade", "--install", &release, ".",
+                "--namespace", &namespace,
+                "--create-namespace",
+                "--values", &values_path,
+                "--atomic=false",
+            ],
+            &helm_dir,
+        );
+
+        DeployResult {
+            resource_id,
+            namespace,
+            source,
+            stdout,
+            stderr,
+            success,
+            commands_run,
+        }
+    } else {
+        // Raw YAML — apply entire directory
+        let apply_cmd = format!("kubectl apply -f {} --recursive", dir.display());
+        commands_run.push(apply_cmd);
+        let dir_str = dir.to_string_lossy().to_string();
+        let (stdout, stderr, success) = run_kubectl_output(&[
+            "apply", "-f", &dir_str, "--recursive",
+        ]);
+
+        DeployResult {
+            resource_id,
+            namespace,
+            source,
+            stdout,
+            stderr,
+            success,
+            commands_run,
+        }
+    }
+}
+
+// ─── NEW: Delete Resource ─────────────────────────────────────────────────────
+
+/// Remove a resource from the cluster.
+/// For helm — runs helm uninstall.
+/// For raw — runs kubectl delete -f <dir>.
+/// Does NOT remove files from disk.
+#[tauri::command]
+async fn remove_resource(
+    resource_id: String,
+    source: String,
+    resource_dir: String,
+    namespace: String,
+    helm_release: Option<String>,
+) -> DeployResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        remove_resource_inner(resource_id, source, resource_dir, namespace, helm_release)
+    }).await.unwrap_or_else(|e| DeployResult {
+        resource_id: String::new(), namespace: String::new(),
+        source: String::new(), stdout: String::new(),
+        stderr: format!("spawn error: {}", e),
+        success: false, commands_run: vec![],
+    })
+}
+
+fn remove_resource_inner(
+    resource_id: String,
+    source: String,
+    resource_dir: String,
+    namespace: String,
+    helm_release: Option<String>,
+) -> DeployResult {
+    let dir = Path::new(&resource_dir);
+    let mut commands_run: Vec<String> = Vec::new();
+
+    if source == "helm" {
+        let release = helm_release.unwrap_or_else(|| resource_id.clone());
+        let cmd = format!(
+            "helm uninstall {} --namespace {} --ignore-not-found",
+            release, namespace
+        );
+        commands_run.push(cmd);
+        let (stdout, stderr, success) = run_helm_output(
+            &["uninstall", &release, "--namespace", &namespace, "--ignore-not-found"],
+            dir,
+        );
+        DeployResult { resource_id, namespace, source, stdout, stderr, success, commands_run }
+    } else {
+        let dir_str = dir.to_string_lossy().to_string();
+        let cmd = format!("kubectl delete -f {} --recursive --ignore-not-found=true", dir_str);
+        commands_run.push(cmd);
+        let (stdout, stderr, success) = run_kubectl_output(&[
+            "delete", "-f", &dir_str, "--recursive", "--ignore-not-found=true",
+        ]);
+        DeployResult { resource_id, namespace, source, stdout, stderr, success, commands_run }
+    }
+}
+
+// ─── NEW: Diff Resource ───────────────────────────────────────────────────────
+
+/// Show what would change if we applied the local YAML vs the live cluster state.
+/// Uses `kubectl diff -f <dir>` which requires a cluster connection.
+/// For Helm, diffs using `helm diff upgrade` (requires helm-diff plugin).
+#[tauri::command]
+fn diff_resource(
+    resource_id: String,
+    source: String,
+    resource_dir: String,
+    namespace: String,
+    helm_release: Option<String>,
+    values_file: Option<String>,
+) -> DiffResult {
+    let dir = Path::new(&resource_dir);
+
+    if source == "helm" {
+        let helm_dir = dir.join("helm");
+        let release = helm_release.unwrap_or_else(|| resource_id.clone());
+        let values_path = values_file.unwrap_or_else(|| {
+            helm_dir.join("values.yaml").to_string_lossy().to_string()
+        });
+
+        // Try helm diff upgrade (requires helm-diff plugin)
+        let (stdout, stderr, success) = run_helm_output(
+            &[
+                "diff", "upgrade", &release, ".",
+                "--namespace", &namespace,
+                "--values", &values_path,
+                "--allow-unreleased",
+            ],
+            &helm_dir,
+        );
+
+        if success || !stdout.is_empty() {
+            return DiffResult {
+                resource_id,
+                diff: stdout,
+                has_changes: true,
+                error: None,
+            };
+        }
+
+        // Fallback: diff using rendered/ directory
+        let rendered_dir = dir.join("rendered");
+        if rendered_dir.exists() {
+            let rendered_str = rendered_dir.to_string_lossy().to_string();
+            let (diff_out, diff_err, _) = run_kubectl_output(&[
+                "diff", "-f", &rendered_str,
+            ]);
+            return DiffResult {
+                resource_id,
+                has_changes: !diff_out.is_empty(),
+                diff: if diff_out.is_empty() { diff_err } else { diff_out },
+                error: if stderr.is_empty() { None } else { Some(stderr) },
+            };
+        }
+
+        DiffResult {
+            resource_id,
+            diff: String::new(),
+            has_changes: false,
+            error: Some(format!("helm diff failed and no rendered/ dir: {}", stderr)),
+        }
+    } else {
+        let dir_str = dir.to_string_lossy().to_string();
+        let (stdout, stderr, _exit) = run_kubectl_output(&[
+            "diff", "-f", &dir_str, "--recursive",
+        ]);
+        // kubectl diff exits 1 when there ARE differences — that's not an error
+        let has_changes = !stdout.is_empty();
+        let error = if !has_changes && !stderr.is_empty() {
+            Some(stderr)
+        } else {
+            None
+        };
+        DiffResult {
+            resource_id,
+            diff: stdout,
+            has_changes,
+            error,
+        }
+    }
+}
+
+// ─── NEW: Get Logs ────────────────────────────────────────────────────────────
+
+/// Get logs for a field. Tries to find a running pod by label app=<field_id>
+/// and returns recent logs.
+#[tauri::command]
+fn get_field_logs(
+    field_id: String,
+    namespace: String,
+    tail: u32,
+    previous: bool,
+) -> Result<String, String> {
+    // List pods matching label
+    let pods_raw = run_kubectl(&[
+        "get", "pods",
+        "-n", &namespace,
+        "-l", &format!("app={}", field_id),
+        "--no-headers",
+        "-o", "custom-columns=NAME:.metadata.name,STATUS:.status.phase",
+    ])?;
+
+    let pod_name = pods_raw
+        .lines()
+        .find_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[1] == "Running" {
+                Some(parts[0].to_string())
+            } else if parts.len() >= 1 {
+                Some(parts[0].to_string()) // fallback: first pod
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| format!("No pods found for app={} in {}", field_id, namespace))?;
+
+    let tail_str = tail.to_string();
+    let tail_arg = format!("--tail={}", tail_str);
+    let mut args = vec![
+        "logs", "-n", &namespace, &pod_name,
+        &tail_arg,
+    ];
+    if previous {
+        args.push("--previous");
+    }
+
+    run_kubectl(&args)
+}
+
+// ─── Existing Tauri commands ──────────────────────────────────────────────────
 
 #[tauri::command]
 async fn open_folder_dialog(app: tauri::AppHandle) -> Option<String> {
@@ -1112,9 +2006,7 @@ fn helm_install(
             "--create-namespace",
             "--values",
             &values_path,
-            "--wait",
-            "--timeout",
-            "5m",
+            "--atomic=false",
         ],
         &helm_dir,
     )?;
@@ -1146,8 +2038,6 @@ fn helm_available() -> bool {
         .unwrap_or(false)
 }
 
-// New async commands as requested
-
 #[tauri::command]
 fn helm_template_async(
     component_dir: String,
@@ -1156,8 +2046,6 @@ fn helm_template_async(
     values_file: Option<String>,
 ) -> Result<String, String> {
     std::thread::spawn(move || {
-        // Reuse helm_template logic by calling run_helm and writing rendered files
-        // This block should be a near-copy of helm_template, but errors are ignored here since this is fire-and-forget.
         let dir = std::path::Path::new(&component_dir);
         let helm_dir = dir.join("helm");
         let rendered_dir = dir.join("rendered");
@@ -1218,7 +2106,7 @@ fn helm_install_async(
             return;
         }
         let values_path = values_file
-            .unwrap_or_else(|| helm_dir.join("values.yaml").to_string_lossy().to_string());
+            .unwrap_or_else(|| helm_dir.join(  "values.yaml").to_string_lossy().to_string());
         let _ = run_helm(
             &[
                 "upgrade",
@@ -1245,34 +2133,463 @@ fn kubectl_apply_async(path: String) -> Result<String, String> {
     Ok("started".to_string())
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// ─── Deploy Image ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeployEnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeployPort {
+    #[serde(rename = "containerPort")]
+    pub container_port: u16,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeployResources {
+    #[serde(rename = "cpuRequest")]
+    pub cpu_request: Option<String>,
+    #[serde(rename = "memRequest")]
+    pub mem_request: Option<String>,
+    #[serde(rename = "cpuLimit")]
+    pub cpu_limit: Option<String>,
+    #[serde(rename = "memLimit")]
+    pub mem_limit: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeployImageRequest {
+    pub namespace: String,
+    pub name: String,
+    pub image: String,
+    pub replicas: u32,
+    pub env: Vec<DeployEnvVar>,
+    #[serde(rename = "secretEnv")]
+    pub secret_env: Vec<DeployEnvVar>,
+    pub ports: Vec<DeployPort>,
+    #[serde(rename = "serviceType", default = "default_service_type")]
+    pub service_type: String,
+    pub resources: Option<DeployResources>,
+    #[serde(rename = "imagePullSecret")]
+    pub image_pull_secret: Option<String>,
+    #[serde(rename = "createNamespace", default)]
+    pub create_namespace: bool,
+}
+
+fn default_service_type() -> String { "ClusterIP".to_string() }
+
+#[derive(Debug, Serialize)]
+pub struct DeployImageManifests {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    pub deployment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeployImageResult {
+    pub success: bool,
+    #[serde(rename = "deploymentName")]
+    pub deployment_name: String,
+    #[serde(rename = "secretName")]
+    pub secret_name: Option<String>,
+    #[serde(rename = "serviceName")]
+    pub service_name: Option<String>,
+    pub namespace: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub error: Option<String>,
+    pub manifests: DeployImageManifests,
+}
+
+// ── Manifest generators ────────────────────────────────────────────────────────
+
+fn gen_image_namespace(ns: &str) -> String {
+    format!(
+"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {ns}
+  labels:
+    app.kubernetes.io/managed-by: endfield
+    endfield/type: image-deploy
+"
+    )
+}
+
+fn gen_image_secret(name: &str, ns: &str, vars: &[DeployEnvVar]) -> String {
+    let secret_name = format!("{}-secrets", name);
+    let data: String = vars.iter()
+        .map(|e| format!("  {}: \"{}\"\n", e.key, e.value.replace('"', "\\\"")))
+        .collect();
+    format!(
+"apiVersion: v1
+kind: Secret
+metadata:
+  name: {secret_name}
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/name: {name}
+    app.kubernetes.io/managed-by: endfield
+    endfield/type: image-deploy
+    endfield/namespace: {ns}
+type: Opaque
+stringData:
+{data}"
+    )
+}
+
+fn gen_image_deployment(req: &DeployImageRequest) -> String {
+    let name = &req.name;
+    let ns = &req.namespace;
+    let secret_name = format!("{}-secrets", name);
+
+    // ports block
+    let ports_yaml = if req.ports.is_empty() {
+        String::new()
+    } else {
+        let lines: String = req.ports.iter().map(|p| {
+            let name_line = match &p.name {
+                Some(n) if !n.is_empty() => format!("              name: {}\n", n),
+                _ => String::new(),
+            };
+            format!("            - containerPort: {}\n{}", p.container_port, name_line)
+        }).collect();
+        format!("          ports:\n{}", lines)
+    };
+
+    // plain env
+    let plain_env: String = req.env.iter().map(|e| {
+        format!("            - name: {}\n              value: \"{}\"\n", e.key, e.value.replace('"', "\\\""))
+    }).collect();
+
+    // secret env via secretKeyRef
+    let secret_env: String = req.secret_env.iter().map(|e| {
+        format!(
+"            - name: {key}
+              valueFrom:
+                secretKeyRef:
+                  name: {secret_name}
+                  key: {key}
+",
+            key = e.key,
+            secret_name = secret_name,
+        )
+    }).collect();
+
+    let env_block = if plain_env.is_empty() && secret_env.is_empty() {
+        String::new()
+    } else {
+        format!("          env:\n{}{}", plain_env, secret_env)
+    };
+
+    // resources block
+    let resources_block = match &req.resources {
+        Some(r) => {
+            let cpu_req = r.cpu_request.as_deref().unwrap_or("100m");
+            let mem_req = r.mem_request.as_deref().unwrap_or("128Mi");
+            let cpu_lim = r.cpu_limit.as_deref().unwrap_or("500m");
+            let mem_lim = r.mem_limit.as_deref().unwrap_or("512Mi");
+            format!(
+"          resources:
+            requests:
+              cpu: \"{cpu_req}\"
+              memory: \"{mem_req}\"
+            limits:
+              cpu: \"{cpu_lim}\"
+              memory: \"{mem_lim}\"
+"
+            )
+        }
+        None => String::new(),
+    };
+
+    // imagePullSecrets block
+    let pull_secrets_block = match &req.image_pull_secret {
+        Some(s) if !s.is_empty() => format!(
+"      imagePullSecrets:
+        - name: {s}
+"
+        ),
+        _ => String::new(),
+    };
+
+    format!(
+"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/name: {name}
+    app.kubernetes.io/managed-by: endfield
+    endfield/type: image-deploy
+    endfield/namespace: {ns}
+spec:
+  replicas: {replicas}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {name}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {name}
+        app.kubernetes.io/managed-by: endfield
+    spec:
+{pull_secrets_block}      containers:
+        - name: {name}
+          image: {image}
+{ports_yaml}{env_block}{resources_block}",
+        name = name,
+        ns = ns,
+        replicas = req.replicas,
+        image = req.image,
+        pull_secrets_block = pull_secrets_block,
+        ports_yaml = ports_yaml,
+        env_block = env_block,
+        resources_block = resources_block,
+    )
+}
+
+fn gen_image_service(name: &str, ns: &str, ports: &[DeployPort], service_type: &str) -> String {
+    let port_lines: String = ports.iter().map(|p| {
+        let name_line = match &p.name {
+            Some(n) if !n.is_empty() => format!("      name: {}\n    ", n),
+            _ => String::new(),
+        };
+        format!(
+"    - {}port: {port}
+      targetPort: {port}
+      protocol: TCP
+",
+            name_line,
+            port = p.container_port,
+        )
+    }).collect();
+
+    format!(
+"apiVersion: v1
+kind: Service
+metadata:
+  name: {name}
+  namespace: {ns}
+  labels:
+    app.kubernetes.io/name: {name}
+    app.kubernetes.io/managed-by: endfield
+    endfield/type: image-deploy
+    endfield/namespace: {ns}
+spec:
+  selector:
+    app.kubernetes.io/name: {name}
+  type: {service_type}
+  ports:
+{port_lines}"
+    )
+}
+
+/// Deploy a custom Docker image to Kubernetes.
+/// Generates manifests in-memory and applies them via kubectl apply --server-side.
+/// Idempotent: re-running updates image/env/replicas.
+#[tauri::command]
+async fn deploy_image(request: DeployImageRequest) -> DeployImageResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        deploy_image_inner(request)
+    }).await.unwrap_or_else(|e| DeployImageResult {
+        success: false,
+        deployment_name: String::new(),
+        secret_name: None,
+        service_name: None,
+        namespace: String::new(),
+        stdout: String::new(),
+        stderr: format!("spawn error: {}", e),
+        error: Some(format!("spawn error: {}", e)),
+        manifests: DeployImageManifests {
+            namespace: None,
+            secret: None,
+            deployment: String::new(),
+            service: None,
+        },
+    })
+}
+
+fn deploy_image_inner(req: DeployImageRequest) -> DeployImageResult {
+    let name = req.name.clone();
+    let ns = req.namespace.clone();
+    let has_secret = !req.secret_env.is_empty();
+    let has_service = !req.ports.is_empty();
+    let secret_name = if has_secret { Some(format!("{}-secrets", name)) } else { None };
+    let service_name = if has_service { Some(name.clone()) } else { None };
+
+    // Build manifests
+    let ns_manifest = if req.create_namespace {
+        Some(gen_image_namespace(&ns))
+    } else {
+        None
+    };
+    let secret_manifest = if has_secret {
+        Some(gen_image_secret(&name, &ns, &req.secret_env))
+    } else {
+        None
+    };
+    let deploy_manifest = gen_image_deployment(&req);
+    let service_manifest = if has_service {
+        Some(gen_image_service(&name, &ns, &req.ports, &req.service_type))
+    } else {
+        None
+    };
+
+    // Apply order: Namespace → Secret → Deployment → Service
+    let mut all_stdout = Vec::<String>::new();
+    let mut all_stderr = Vec::<String>::new();
+    let mut overall_success = true;
+
+    // Ensure namespace
+    if req.create_namespace {
+        let yaml = ns_manifest.as_deref().unwrap();
+        match kubectl_apply_manifest(yaml, &ns) {
+            Ok(out) => all_stdout.push(out),
+            Err(e) => { all_stderr.push(e.clone()); overall_success = false; }
+        }
+    } else {
+        // Just ensure it exists (non-fatal)
+        let _ = ensure_namespace(&ns);
+    }
+
+    if !overall_success {
+        return DeployImageResult {
+            success: false,
+            deployment_name: name,
+            secret_name,
+            service_name,
+            namespace: ns,
+            stdout: all_stdout.join("\n"),
+            stderr: all_stderr.join("\n"),
+            error: Some(all_stderr.join("\n")),
+            manifests: DeployImageManifests {
+                namespace: ns_manifest,
+                secret: secret_manifest,
+                deployment: deploy_manifest,
+                service: service_manifest,
+            },
+        };
+    }
+
+    // Apply Secret
+    if let Some(ref yaml) = secret_manifest {
+        match kubectl_apply_manifest(yaml, &ns) {
+            Ok(out) => all_stdout.push(out),
+            Err(e) => { all_stderr.push(e); overall_success = false; }
+        }
+    }
+
+    // Apply Deployment
+    match kubectl_apply_manifest(&deploy_manifest, &ns) {
+        Ok(out) => all_stdout.push(out),
+        Err(e) => { all_stderr.push(e); overall_success = false; }
+    }
+
+    // Apply Service
+    if let Some(ref yaml) = service_manifest {
+        match kubectl_apply_manifest(yaml, &ns) {
+            Ok(out) => all_stdout.push(out),
+            Err(e) => { all_stderr.push(e); overall_success = false; }
+        }
+    }
+
+    let err = if overall_success { None } else { Some(all_stderr.join("\n")) };
+
+    DeployImageResult {
+        success: overall_success,
+        deployment_name: name,
+        secret_name,
+        service_name,
+        namespace: ns,
+        stdout: all_stdout.join("\n"),
+        stderr: all_stderr.join("\n"),
+        error: err,
+        manifests: DeployImageManifests {
+            namespace: ns_manifest,
+            secret: secret_manifest,
+            deployment: deploy_manifest,
+            service: service_manifest,
+        },
+    }
+}
+
+/// Apply a YAML string via kubectl apply --server-side (stdin).
+fn kubectl_apply_manifest(yaml: &str, _namespace: &str) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = Command::new("kubectl")
+        .args(["apply", "--server-side", "--field-manager=endfield", "-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("kubectl not found: {}", e))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(yaml.as_bytes())
+            .map_err(|e| format!("stdin write error: {}", e))?;
+    }
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("kubectl wait error: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            // Project / file IO
             open_folder_dialog,
             scan_yaml_files,
             read_yaml_file,
             save_yaml_file,
+            // Generation (new)
+            generate_field,
+            generate_infra,
+            // Deploy / delete (new)
+            deploy_resource,
+            remove_resource,
+            diff_resource,
+            get_field_logs,
+            // Cluster state
+            get_cluster_status,
+            // kubectl helpers
             delete_field_files,
             kubectl_delete_by_label,
-            get_cluster_status,
             apply_replicas,
             kubectl_apply,
+            kubectl_apply_async,
             get_pod_logs,
             get_events,
+            // Helm
             helm_template,
+            helm_template_async,
             helm_install,
+            helm_install_async,
             helm_uninstall,
             helm_available,
-            helm_template_async,
-            helm_install_async,
-            kubectl_apply_async,
+            // Layout
             save_endfield_layout,
             load_endfield_layout,
+            // Deploy Image
+            deploy_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
