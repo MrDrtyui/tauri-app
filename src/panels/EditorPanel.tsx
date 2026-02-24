@@ -17,6 +17,9 @@ export function EditorPanel({ tab, groupId }: EditorPanelProps) {
     msg: string;
   } | null>(null);
   const markTabDirty = useIDEStore((s) => s.markTabDirty);
+  // Optimistic sync: update Inspector immediately on save,
+  // before the OS file-change event arrives from the watcher.
+  const updateNodeFromFile = useIDEStore((s) => s.updateNodeFromFile);
 
   useEffect(() => {
     const filePath = tab.filePath ?? "";
@@ -55,6 +58,8 @@ export function EditorPanel({ tab, groupId }: EditorPanelProps) {
       await saveYamlFile(tab.filePath, content);
       setIsDirty(false);
       markTabDirty(tab.id, false);
+      // Optimistic update — don't wait for the file-watcher event
+      updateNodeFromFile(tab.filePath, content);
       // Auto-apply to cluster after save
       try {
         await kubectlApply(tab.filePath);

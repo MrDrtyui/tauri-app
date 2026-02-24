@@ -55,6 +55,8 @@ interface IDEStore {
   removeNode: (id: string) => void;
   renameNode: (id: string, newName: string) => void;
   refreshClusterStatus: () => Promise<void>;
+  /** Parse YAML content and update the matching node's fields in the store. */
+  updateNodeFromFile: (filePath: string, yamlContent: string) => void;
 
   // ── Tab actions ──────────────────────────────────────────────────────────────
   openTab: (tab: Tab, preferSlot?: DockSlot) => void;
@@ -232,6 +234,23 @@ export const useIDEStore = create<IDEStore>()(
         const status = await getClusterStatus();
         set({ clusterStatus: status });
       } catch {}
+    },
+
+    updateNodeFromFile: (filePath: string, yamlContent: string) => {
+      const parsed = parseYamlNodeFields(yamlContent);
+      if (!parsed) return;
+      set((state) => ({
+        nodes: state.nodes.map((n) => {
+          if (n.file_path !== filePath) return n;
+          return {
+            ...n,
+            ...(parsed.kind != null && { kind: parsed.kind }),
+            ...(parsed.namespace != null && { namespace: parsed.namespace }),
+            ...(parsed.image != null && { image: parsed.image }),
+            ...(parsed.replicas != null && { replicas: parsed.replicas }),
+          };
+        }),
+      }));
     },
 
     // ── openTab ───────────────────────────────────────────────────────────────
@@ -481,6 +500,91 @@ export const useIDEStore = create<IDEStore>()(
     },
   })),
 );
+
+// ─── Lightweight YAML field parser ───────────────────────────────────────────
+//
+// Extracts kind / namespace / image / replicas from raw YAML text without
+// pulling in a full YAML parser. Handles multi-doc files (---) by reading
+// the first document that contains a known workload kind.
+
+const WORKLOAD_KINDS = new Set([
+  "Deployment",
+  "StatefulSet",
+  "DaemonSet",
+  "Job",
+  "CronJob",
+  "ReplicaSet",
+  "Pod",
+]);
+
+interface ParsedFields {
+  kind?: string;
+  namespace?: string;
+  image?: string;
+  replicas?: number;
+}
+
+function parseYamlNodeFields(yaml: string): ParsedFields | null {
+  // Split on YAML document separators; process each doc
+  const docs = yaml.split(/^---\s*$/m);
+
+  for (const doc of docs) {
+    const lines = doc.split("\n");
+
+    // 1. kind (top-level, no leading spaces)
+    const kind = lines
+      .find((l) => /^kind:\s*\S/.test(l))
+      ?.replace(/^kind:\s*/, "")
+      .trim();
+
+    // Only update nodes that are workloads
+    if (!kind || !WORKLOAD_KINDS.has(kind)) continue;
+
+    const result: ParsedFields = { kind };
+
+    // 2. namespace — under metadata: block (2-space indent)
+    let inMeta = false;
+    for (const line of lines) {
+      if (/^metadata:\s*$/.test(line)) {
+        inMeta = true;
+        continue;
+      }
+      if (inMeta) {
+        if (/^\S/.test(line)) {
+          inMeta = false;
+          break;
+        }
+        const m = line.match(/^  namespace:\s*["']?([^"'\s#]+)["']?/);
+        if (m) {
+          result.namespace = m[1];
+          break;
+        }
+      }
+    }
+
+    // 3. image — first occurrence anywhere in doc (under containers:)
+    for (const line of lines) {
+      const m = line.match(/^\s+image:\s*["']?([^"'\s#]+)["']?/);
+      if (m && !m[1].startsWith("{{")) {
+        result.image = m[1];
+        break;
+      }
+    }
+
+    // 4. replicas — first occurrence (spec.replicas)
+    for (const line of lines) {
+      const m = line.match(/^\s*replicas:\s*(\d+)/);
+      if (m) {
+        result.replicas = parseInt(m[1], 10);
+        break;
+      }
+    }
+
+    return result;
+  }
+
+  return null;
+}
 
 // ─── Tree mapper helper ───────────────────────────────────────────────────────
 

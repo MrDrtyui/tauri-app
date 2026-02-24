@@ -331,6 +331,26 @@ function generateHelmConfigs(
   };
 }
 
+const STATEFUL_IMAGES = [
+  "postgres",
+  "mysql",
+  "mongo",
+  "mariadb",
+  "redis",
+  "kafka",
+  "redpanda",
+  "cassandra",
+  "clickhouse",
+  "rabbitmq",
+  "nats",
+  "elasticsearch",
+];
+
+function isStatefulPreset(preset: FieldPreset): boolean {
+  const img = preset.image.toLowerCase();
+  return STATEFUL_IMAGES.some((name) => img.includes(name));
+}
+
 function generateConfigs(
   name: string,
   preset: FieldPreset,
@@ -342,23 +362,27 @@ function generateConfigs(
   const n = name.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const f = preset.folder;
   const secretKeys = ["PASSWORD", "SECRET", "KEY", "TOKEN", "PASS"];
-  const sensitiveVars = envVars.filter((e) =>
+  const hasSensitive = envVars.some((e) =>
     secretKeys.some((k) => e.key.toUpperCase().includes(k)),
   );
-  const plainVars = envVars.filter(
-    (e) => !secretKeys.some((k) => e.key.toUpperCase().includes(k)),
-  );
+
   files["namespace.yaml"] =
     `apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${namespace}\n  labels:\n    managed-by: endfield\n`;
-  if (sensitiveVars.length > 0)
-    files[`${f}/${n}-secret.yaml`] =
-      `apiVersion: v1\nkind: Secret\nmetadata:\n  name: ${n}-secret\n  namespace: ${namespace}\ntype: Opaque\nstringData:\n${sensitiveVars.map((e) => `  ${e.key}: "${e.value}"`).join("\n")}\n`;
-  if (preset.generateService)
-    files[`${f}/${n}-service.yaml`] =
-      `apiVersion: v1\nkind: Service\nmetadata:\n  name: ${n}\n  namespace: ${namespace}\nspec:\n  type: ClusterIP\n  selector:\n    app: ${n}\n  ports:\n    - port: ${port}\n      targetPort: ${port}\n      protocol: TCP\n`;
-  files[
-    `${f}/${n}-${preset.kind === "StatefulSet" ? "statefulset" : "deployment"}.yaml`
-  ] = `# ${preset.kind} for ${n}\n`;
+
+  if (hasSensitive) files[`${f}/${n}-secret.yaml`] = "";
+
+  if (preset.generateService) files[`${f}/${n}-service.yaml`] = "";
+
+  const isStateful = isStatefulPreset(preset);
+  if (isStateful) {
+    files[`${f}/${n}-statefulset.yaml`] = "";
+  } else {
+    files[`${f}/${n}-deployment.yaml`] = "";
+    if (preset.generateConfigMap) {
+      files[`${f}/${n}-configmap.yaml`] = "";
+    }
+  }
+
   return files;
 }
 
@@ -848,14 +872,14 @@ export function AddFieldModal({ onClose, namespace }: Props) {
       const fieldDir = `${projectPath}/apps/${n}`;
       const mainFile =
         genResult.generated_files.find(
-          (f) => f.includes("deployment") || f.includes("statefulset"),
+          (f) => f.includes("statefulset") || f.includes("deployment"),
         ) ??
         genResult.generated_files[0] ??
         `${fieldDir}/deployment.yaml`;
       addNode({
         id: genId("node"),
         label: n,
-        kind: preset.kind,
+        kind: isStatefulPreset(preset) ? "StatefulSet" : preset.kind,
         image: preset.image || `${n}:latest`,
         type_id: preset.typeId,
         namespace: genResult.namespace,

@@ -1,10 +1,5 @@
-import {
-  AppIcon,
-  resolveNodeIconName,
-  resolveNodeColor,
-  contentTypeIcon,
-} from "../ui/AppIcon";
-import React from "react";
+import { AppIcon } from "../ui/AppIcon";
+import React, { useEffect, useRef, useState } from "react";
 import { useIDEStore } from "../store/ideStore";
 
 // ─── Status badge ─────────────────────────────────────────────────
@@ -70,10 +65,12 @@ function PropRow({
   label,
   value,
   mono = false,
+  highlight = false,
 }: {
   label: string;
   value: React.ReactNode;
   mono?: boolean;
+  highlight?: boolean;
 }) {
   return (
     <div
@@ -82,6 +79,10 @@ function PropRow({
         alignItems: "flex-start",
         gap: 10,
         marginBottom: 10,
+        borderRadius: "var(--radius-xs)",
+        padding: highlight ? "2px 5px" : "2px 5px",
+        background: highlight ? "rgba(166,227,161,0.08)" : "transparent",
+        transition: "background 0.6s ease",
       }}
     >
       <span
@@ -143,6 +144,45 @@ function Section({
   );
 }
 
+// ─── SyncDot — pulses green on change, fades to neutral ───────────
+
+function SyncDot({
+  pulsing,
+  lastSynced,
+}: {
+  pulsing: boolean;
+  lastSynced: Date | null;
+}) {
+  if (!lastSynced) return null;
+  return (
+    <span
+      title={`Last synced ${lastSynced.toLocaleTimeString()}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: "var(--font-size-xs)",
+        color: pulsing ? "var(--ctp-green)" : "var(--text-faint)",
+        fontFamily: "var(--font-mono)",
+        transition: "color 0.6s ease",
+      }}
+    >
+      <span
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          display: "inline-block",
+          background: pulsing ? "var(--ctp-green)" : "var(--border-default)",
+          boxShadow: pulsing ? "0 0 8px var(--ctp-green)" : "none",
+          transition: "background 0.6s ease, box-shadow 0.6s ease",
+        }}
+      />
+      synced
+    </span>
+  );
+}
+
 // ─── InspectorPanel ───────────────────────────────────────────────
 
 export function InspectorPanel() {
@@ -151,22 +191,70 @@ export function InspectorPanel() {
   const nodes = useIDEStore((s) => s.nodes);
   const clusterStatus = useIDEStore((s) => s.clusterStatus);
 
-  if (!selectedEntity || selectedEntity.type === "none") {
-    return <EmptyInspector />;
-  }
+  const [lastSynced, setLastSynced] = useState<Date | null>(null);
+  const [pulsing, setPulsing] = useState(false);
 
-  const { type, id, label, filePath } = selectedEntity;
+  const { type, id, label, filePath } = selectedEntity ?? {};
 
   const node =
-    type === "field"
+    selectedEntity && type === "field"
       ? nodes.find((n) => n.id === id)
-      : type === "graphNode"
+      : selectedEntity && (type === "graphNode" || type === "file")
         ? nodes.find((n) => n.file_path === filePath || n.id === id)
         : null;
 
   const clusterInfo = node
     ? clusterStatus?.fields.find((f) => f.label === node.label)
     : null;
+
+  // Snapshot of previous values — used for diff highlighting
+  const prevRef = useRef({
+    image: "",
+    replicas: null as number | null,
+    namespace: "",
+    kind: "",
+  });
+
+  // Detect changes pushed by updateNodeFromFile (from watcher or editor save)
+  useEffect(() => {
+    if (!node) return;
+    const p = prevRef.current;
+    const changed =
+      p.image !== node.image ||
+      p.replicas !== node.replicas ||
+      p.namespace !== node.namespace ||
+      p.kind !== node.kind;
+
+    if (changed) {
+      setLastSynced(new Date());
+      setPulsing(true);
+      const t = setTimeout(() => setPulsing(false), 1500);
+      // Update snapshot AFTER reading diff so highlight logic can compare
+      prevRef.current = {
+        image: node.image,
+        replicas: node.replicas ?? null,
+        namespace: node.namespace,
+        kind: node.kind,
+      };
+      return () => clearTimeout(t);
+    }
+  }, [node?.image, node?.replicas, node?.namespace, node?.kind]);
+
+  // Reset sync state when selection changes
+  useEffect(() => {
+    setLastSynced(null);
+    setPulsing(false);
+    prevRef.current = {
+      image: node?.image ?? "",
+      replicas: node?.replicas ?? null,
+      namespace: node?.namespace ?? "",
+      kind: node?.kind ?? "",
+    };
+  }, [id, filePath]);
+
+  if (!selectedEntity || selectedEntity.type === "none") {
+    return <EmptyInspector />;
+  }
 
   return (
     <div
@@ -179,7 +267,7 @@ export function InspectorPanel() {
         color: "var(--text-secondary)",
       }}
     >
-      {/* Header */}
+      {/* ── Header ── */}
       <div
         style={{
           padding: "12px 14px 10px",
@@ -229,11 +317,21 @@ export function InspectorPanel() {
                   : "Field"}
             </div>
           </div>
-          {clusterInfo && <StatusBadge status={clusterInfo.status} />}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flexShrink: 0,
+            }}
+          >
+            <SyncDot pulsing={pulsing} lastSynced={lastSynced} />
+            {clusterInfo && <StatusBadge status={clusterInfo.status} />}
+          </div>
         </div>
       </div>
 
-      {/* Body */}
+      {/* ── Body ── */}
       <div style={{ flex: 1, overflowY: "auto", padding: "14px 14px" }}>
         {/* Location */}
         {filePath && (
@@ -249,7 +347,7 @@ export function InspectorPanel() {
                 openTab(
                   {
                     id: `file-${filePath}`,
-                    title: filePath.split("/").pop() ?? label,
+                    title: filePath.split("/").pop() ?? label ?? "",
                     contentType: "file",
                     filePath,
                     icon: filePath.includes("Chart.yaml")
@@ -288,19 +386,45 @@ export function InspectorPanel() {
           </Section>
         )}
 
-        {/* Field details */}
+        {/* Properties — live-synced from YAML via file watcher */}
         {node && (
-          <Section title="Field">
-            <PropRow label="Kind" value={node.kind} mono />
-            <PropRow label="Namespace" value={node.namespace} mono />
-            {node.image && <PropRow label="Image" value={node.image} mono />}
+          <Section title="Properties">
+            <PropRow
+              label="Kind"
+              value={node.kind}
+              mono
+              highlight={pulsing && prevRef.current.kind !== node.kind}
+            />
+            <PropRow
+              label="Namespace"
+              value={node.namespace}
+              mono
+              highlight={
+                pulsing && prevRef.current.namespace !== node.namespace
+              }
+            />
+            {node.image && (
+              <PropRow
+                label="Image"
+                value={node.image}
+                mono
+                highlight={pulsing && prevRef.current.image !== node.image}
+              />
+            )}
             {node.replicas != null && (
-              <PropRow label="Replicas" value={node.replicas} />
+              <PropRow
+                label="Replicas"
+                value={String(node.replicas)}
+                highlight={
+                  pulsing && prevRef.current.replicas !== node.replicas
+                }
+              />
             )}
             <PropRow
               label="Source"
               value={node.source === "helm" ? "Helm" : "Raw YAML"}
             />
+            {node.type_id && <PropRow label="Type" value={node.type_id} mono />}
           </Section>
         )}
 
@@ -311,8 +435,85 @@ export function InspectorPanel() {
               label="Status"
               value={<StatusBadge status={clusterInfo.status} />}
             />
-            {clusterInfo.message && (
-              <PropRow label="Message" value={clusterInfo.message} mono />
+            <PropRow
+              label="Ready"
+              value={`${clusterInfo.ready} / ${clusterInfo.desired}`}
+            />
+            {clusterInfo.pods.length > 0 && (
+              <div
+                style={{
+                  marginTop: 6,
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: "var(--radius-sm)",
+                  overflow: "hidden",
+                }}
+              >
+                {clusterInfo.pods.map((pod, i) => (
+                  <div
+                    key={pod.name}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "5px 8px",
+                      borderTop:
+                        i === 0 ? "none" : "1px solid var(--border-subtle)",
+                      background: "var(--bg-surface)",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        flexShrink: 0,
+                        background:
+                          pod.phase === "Running"
+                            ? "var(--status-ok)"
+                            : pod.phase === "Pending"
+                              ? "var(--status-warn)"
+                              : "var(--status-error)",
+                      }}
+                    />
+                    <span
+                      style={{
+                        flex: 1,
+                        fontSize: "var(--font-size-xs)",
+                        fontFamily: "var(--font-mono)",
+                        color: "var(--text-faint)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {pod.name}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "var(--font-size-xs)",
+                        fontFamily: "var(--font-mono)",
+                        color: "var(--text-subtle)",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {pod.ready}/{pod.total}
+                    </span>
+                    {pod.restarts > 0 && (
+                      <span
+                        style={{
+                          fontSize: "var(--font-size-xs)",
+                          fontFamily: "var(--font-mono)",
+                          color: "var(--ctp-yellow)",
+                          flexShrink: 0,
+                        }}
+                        title="Restart count"
+                      >
+                        ↺{pod.restarts}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </Section>
         )}
@@ -320,7 +521,7 @@ export function InspectorPanel() {
         {/* File-only info */}
         {type === "file" && !node && (
           <Section title="File">
-            <PropRow label="Name" value={label} />
+            <PropRow label="Name" value={label ?? ""} />
           </Section>
         )}
       </div>

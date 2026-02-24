@@ -403,22 +403,25 @@ function TitleBar() {
   return (
     <div
       style={{
-        height: 38,
+        height: 34,
         background: "var(--bg-toolbar)",
         backdropFilter: "var(--blur-md)",
         WebkitBackdropFilter: "var(--blur-md)",
         borderBottom: "1px solid var(--border-subtle)",
         display: "flex",
         alignItems: "center",
-        padding: "0 14px",
-        gap: 10,
+        paddingLeft: 76,
+        paddingRight: 14,
+        gap: 8,
         flexShrink: 0,
-        /* macOS traffic lights spacing */
-        paddingLeft: 78,
       }}
+      className="drag-region"
     >
-      {/* Logo */}
-      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+      {/* Logo — no-drag so click works */}
+      <div
+        className="no-drag"
+        style={{ display: "flex", alignItems: "center", gap: 6 }}
+      >
         <div
           onClick={closeProject}
           title="Back to start"
@@ -462,29 +465,41 @@ function TitleBar() {
       </div>
 
       {/* Separator */}
-      <span style={{ color: "var(--border-strong)", fontSize: 12 }}>·</span>
+      <span
+        className="no-drag"
+        style={{ color: "var(--border-strong)", fontSize: 12 }}
+      >
+        ·
+      </span>
 
       {/* Project name */}
       <span
+        className="no-drag"
         style={{
           color: "var(--text-muted)",
           fontSize: "var(--font-size-sm)",
           fontFamily: "var(--font-mono)",
           letterSpacing: "0.01em",
+          userSelect: "none",
         }}
       >
         {projectName}
       </span>
 
-      {/* Menu bar */}
-      <div style={{ display: "flex", gap: 2, marginLeft: 12 }}>
+      {/* Menu bar — no-drag so dropdowns work */}
+      <div
+        className="no-drag"
+        style={{ display: "flex", gap: 2, marginLeft: 8 }}
+      >
         <ViewMenu />
       </div>
 
-      <div style={{ flex: 1 }} />
+      {/* Spacer — drag region, no children so it works correctly */}
+      <div data-tauri-drag-region style={{ flex: 1, height: "100%" }} />
 
       {/* Version badge */}
       <span
+        className="no-drag"
         style={{
           color: "var(--text-faint)",
           fontSize: 9,

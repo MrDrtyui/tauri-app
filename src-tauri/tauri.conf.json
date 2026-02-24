@@ -15,7 +15,10 @@
       {
         "title": "endfield",
         "width": 900,
-        "height": 600
+        "height": 600,
+        "title": "endfield",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

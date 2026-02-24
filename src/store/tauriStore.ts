@@ -882,3 +882,26 @@ export async function deployImage(
 ): Promise<DeployImageResult> {
   return safeInvoke<DeployImageResult>("deploy_image", { request });
 }
+
+// ─── File Watcher ─────────────────────────────────────────────────────────────
+
+export interface FileChangedPayload {
+  path: string;
+  kind: "modify" | "create" | "remove";
+}
+
+/**
+ * Start watching project_path for YAML file changes.
+ * The backend emits `yaml-file-changed` events on any .yaml/.yml mutation.
+ * Call this once when a project is opened; call unwatchProject on close.
+ */
+export async function watchProject(projectPath: string): Promise<void> {
+  return safeInvoke("watch_project", { projectPath });
+}
+
+/**
+ * Stop the current file watcher. Safe to call even if no watcher is active.
+ */
+export async function unwatchProject(): Promise<void> {
+  return safeInvoke("unwatch_project");
+}

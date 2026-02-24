@@ -120,6 +120,13 @@ function TabBar({ group }: { group: TabGroupNode }) {
       >
         <PlusIcon size={13} strokeWidth={2} />
       </button>
+
+      {/* Drag region — empty space after tabs lets user drag the window */}
+      <div
+        data-tauri-drag-region
+        className="drag-region"
+        style={{ flex: 1, cursor: "default", height: "100%" }}
+      />
     </div>
   );
 }
@@ -207,6 +214,7 @@ function TabItem({
         opacity: isDragSrc ? 0.3 : 1,
         transition: "background 0.1s",
       }}
+      className="no-drag"
     >
       {/* Tab type icon */}
       <span

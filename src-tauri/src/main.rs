@@ -1,9 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
 
 // ─── Core Domain Types ────────────────────────────────────────────────────────
@@ -720,9 +724,9 @@ fn generate_deployment_yaml(cfg: &FieldConfig) -> String {
         String::new()
     } else {
         let vars: String = cfg.env.iter().map(|e| {
-            format!("        - name: {}\n          value: \"{}\"\n", e.key, e.value)
+            format!("            - name: {}\n              value: \"{}\"\n", e.key, e.value)
         }).collect();
-        format!("        env:\n{}", vars)
+        format!("          env:\n{}\n", vars)
     };
 
     format!(
@@ -896,6 +900,120 @@ fn generate_helm_values_yaml(cfg: &InfraConfig, helm: &HelmInfraConfig) -> Strin
     )
 }
 
+fn generate_secret_yaml(cfg: &FieldConfig) -> Option<String> {
+    let secret_keys = ["PASSWORD", "SECRET", "KEY", "TOKEN", "PASS"];
+    let sensitive: Vec<&EnvVar> = cfg.env.iter()
+        .filter(|e| secret_keys.iter().any(|k| e.key.to_uppercase().contains(k)))
+        .collect();
+    if sensitive.is_empty() {
+        return None;
+    }
+    let data: String = sensitive.iter()
+        .map(|e| format!("  {}: \"{}\"\n", e.key, e.value.replace('"', "\\\"")))
+        .collect();
+    Some(format!(
+        r#"apiVersion: v1
+kind: Secret
+metadata:
+  name: {name}-secret
+  namespace: {ns}
+  labels:
+    app: {name}
+    managed-by: endfield
+type: Opaque
+stringData:
+{data}"#,
+        name = cfg.id,
+        ns = cfg.namespace,
+        data = data,
+    ))
+}
+
+fn generate_statefulset_yaml(cfg: &FieldConfig) -> String {
+    let secret_keys = ["PASSWORD", "SECRET", "KEY", "TOKEN", "PASS"];
+    let has_secret = cfg.env.iter()
+        .any(|e| secret_keys.iter().any(|k| e.key.to_uppercase().contains(k)));
+    let secret_name = format!("{}-secret", cfg.id);
+
+    let env_block = if cfg.env.is_empty() {
+        String::new()
+    } else {
+        let vars: String = cfg.env.iter().map(|e| {
+            let is_sensitive = secret_keys.iter().any(|k| e.key.to_uppercase().contains(k));
+            if is_sensitive && has_secret {
+                format!(
+                    "            - name: {key}\n              valueFrom:\n                secretKeyRef:\n                  name: {secret}\n                  key: {key}\n",
+                    key = e.key, secret = secret_name,
+                )
+            } else {
+                format!("            - name: {}\n              value: \"{}\"\n", e.key, e.value)
+            }
+        }).collect();
+        format!("          env:\n{}\n", vars)
+    };
+
+    format!(
+        r#"apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {name}
+  namespace: {ns}
+  labels:
+    app: {name}
+    managed-by: endfield
+spec:
+  serviceName: {name}
+  replicas: {replicas}
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      containers:
+        - name: {name}
+          image: {image}
+          ports:
+            - containerPort: {port}
+{env}          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/{name}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+"#,
+        name = cfg.id,
+        ns = cfg.namespace,
+        replicas = cfg.replicas,
+        image = cfg.image,
+        port = cfg.port,
+        env = env_block,
+    )
+}
+
+fn is_stateful_image(image: &str) -> bool {
+    let img = image.to_lowercase();
+    let img = img.split(':').next().unwrap_or("").split('/').last().unwrap_or("");
+    img.contains("postgres") || img.contains("mysql") || img.contains("mongo")
+        || img.contains("mariadb") || img.contains("redis") || img.contains("kafka")
+        || img.contains("redpanda") || img.contains("cassandra") || img.contains("clickhouse")
+        || img.contains("rabbitmq") || img.contains("nats") || img.contains("elasticsearch")
+}
+
 // ─── Patch replicas ────────────────────────────────────────────────────────────
 
 fn patch_replicas_in_file(
@@ -1043,13 +1161,34 @@ fn generate_field(mut config: FieldConfig) -> GenerateResult {
     }
     generated_files.push(ns_path.to_string_lossy().to_string());
 
-    // Write deployment.yaml
-    let deploy_path = field_dir.join("deployment.yaml");
-    let deploy_yaml = generate_deployment_yaml(&config);
-    if let Err(e) = fs::write(&deploy_path, &deploy_yaml) {
-        warnings.push(format!("Cannot write deployment.yaml: {}", e));
+    // Write secret.yaml if env has sensitive keys
+    if let Some(secret_yaml) = generate_secret_yaml(&config) {
+        let secret_path = field_dir.join(format!("{}-secret.yaml", config.id));
+        if let Err(e) = fs::write(&secret_path, &secret_yaml) {
+            warnings.push(format!("Cannot write secret.yaml: {}", e));
+        } else {
+            generated_files.push(secret_path.to_string_lossy().to_string());
+        }
+    }
+
+    // StatefulSet for databases/caches/queues, Deployment for everything else
+    let use_statefulset = is_stateful_image(&config.image);
+    if use_statefulset {
+        let ss_path = field_dir.join("statefulset.yaml");
+        let ss_yaml = generate_statefulset_yaml(&config);
+        if let Err(e) = fs::write(&ss_path, &ss_yaml) {
+            warnings.push(format!("Cannot write statefulset.yaml: {}", e));
+        } else {
+            generated_files.push(ss_path.to_string_lossy().to_string());
+        }
     } else {
-        generated_files.push(deploy_path.to_string_lossy().to_string());
+        let deploy_path = field_dir.join("deployment.yaml");
+        let deploy_yaml = generate_deployment_yaml(&config);
+        if let Err(e) = fs::write(&deploy_path, &deploy_yaml) {
+            warnings.push(format!("Cannot write deployment.yaml: {}", e));
+        } else {
+            generated_files.push(deploy_path.to_string_lossy().to_string());
+        }
     }
 
     // Write service.yaml
@@ -1061,13 +1200,15 @@ fn generate_field(mut config: FieldConfig) -> GenerateResult {
         generated_files.push(svc_path.to_string_lossy().to_string());
     }
 
-    // Write configmap.yaml
-    let cm_path = field_dir.join("configmap.yaml");
-    let cm_yaml = generate_configmap_yaml(&config);
-    if let Err(e) = fs::write(&cm_path, &cm_yaml) {
-        warnings.push(format!("Cannot write configmap.yaml: {}", e));
-    } else {
-        generated_files.push(cm_path.to_string_lossy().to_string());
+    // ConfigMap only for stateless workloads
+    if !use_statefulset {
+        let cm_path = field_dir.join("configmap.yaml");
+        let cm_yaml = generate_configmap_yaml(&config);
+        if let Err(e) = fs::write(&cm_path, &cm_yaml) {
+            warnings.push(format!("Cannot write configmap.yaml: {}", e));
+        } else {
+            generated_files.push(cm_path.to_string_lossy().to_string());
+        }
     }
 
     GenerateResult {
@@ -2606,11 +2747,118 @@ fn kubectl_apply_manifest(yaml: &str, _namespace: &str) -> Result<String, String
     }
 }
 
+// ─── File Watcher ─────────────────────────────────────────────────────────────
+
+/// Payload emitted to the frontend when a YAML file changes.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileChangedPayload {
+    pub path: String,
+    pub kind: String, // "modify" | "create" | "remove"
+}
+
+/// Global watcher handle — lives for the duration of a project session.
+/// Stored in Tauri managed state so Tauri drops it when the app exits.
+pub struct WatcherState(pub Mutex<Option<RecommendedWatcher>>);
+
+/// Start watching `project_path` recursively.
+/// Fires `yaml-file-changed` events on the Tauri window whenever a .yaml/.yml
+/// file is created, modified, or removed.
+///
+/// Calling this again with a different path replaces the previous watcher.
+/// Debounce: multiple events for the same file within 300 ms are collapsed.
+#[tauri::command]
+fn watch_project(
+    app: tauri::AppHandle,
+    state: tauri::State<WatcherState>,
+    project_path: String,
+) -> Result<(), String> {
+    let watch_path = PathBuf::from(&project_path);
+    if !watch_path.exists() {
+        return Err(format!("Path does not exist: {}", project_path));
+    }
+
+    // Debounce state: last event time per path
+    let debounce: Arc<Mutex<std::collections::HashMap<PathBuf, Instant>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+    let app_handle = app.clone();
+    let debounce_clone = debounce.clone();
+
+    let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+        let event = match res {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        // Only care about yaml/yml files
+        for path in &event.paths {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yaml" && ext != "yml" {
+                continue;
+            }
+            // Skip rendered/ and charts/ — those are generated, not user-edited
+            let skip = path.components().any(|c| {
+                let s = c.as_os_str().to_str().unwrap_or("");
+                s == "rendered" || s == "charts" || s == ".git"
+            });
+            if skip {
+                continue;
+            }
+
+            // Debounce: drop duplicate events within 300ms
+            let now = Instant::now();
+            {
+                let mut map = debounce_clone.lock().unwrap();
+                if let Some(last) = map.get(path) {
+                    if now.duration_since(*last) < Duration::from_millis(300) {
+                        continue;
+                    }
+                }
+                map.insert(path.clone(), now);
+            }
+
+            let kind = match event.kind {
+                EventKind::Create(_) => "create",
+                EventKind::Remove(_) => "remove",
+                _ => "modify",
+            };
+
+            let payload = FileChangedPayload {
+                path: path.to_string_lossy().to_string(),
+                kind: kind.to_string(),
+            };
+
+            let _ = app_handle.emit("yaml-file-changed", payload);
+        }
+    })
+    .map_err(|e| format!("Failed to create watcher: {}", e))?;
+
+    // Configure and start watching
+    let mut watcher = watcher;
+    watcher
+        .watch(&watch_path, RecursiveMode::Recursive)
+        .map_err(|e| format!("Failed to watch {}: {}", project_path, e))?;
+
+    // Store, replacing any previous watcher (drop closes old one)
+    let mut guard = state.0.lock().unwrap();
+    *guard = Some(watcher);
+
+    Ok(())
+}
+
+/// Stop the current file watcher, if any.
+#[tauri::command]
+fn unwatch_project(state: tauri::State<WatcherState>) {
+    let mut guard = state.0.lock().unwrap();
+    *guard = None; // Drop the watcher — this unregisters OS-level watches
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(WatcherState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             // Project / file IO
             open_folder_dialog,
@@ -2648,6 +2896,9 @@ fn main() {
             load_endfield_layout,
             // Deploy Image
             deploy_image,
+            // File watcher
+            watch_project,
+            unwatch_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
