@@ -9,7 +9,6 @@ import {
   readYamlFile,
   FileChangedPayload,
 } from "./store/tauriStore";
-
 const GLOBAL_STYLES = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
