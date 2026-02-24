@@ -2747,6 +2747,276 @@ fn kubectl_apply_manifest(yaml: &str, _namespace: &str) -> Result<String, String
     }
 }
 
+// ─── Ingress Nginx Types ──────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IngressNginxStatus {
+    pub ingress_class_name: String,
+    pub controller_service_name: String,
+    pub endpoint: Option<String>,
+    pub ready: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IngressRoute {
+    pub route_id: String,
+    pub field_id: String,
+    pub target_namespace: String,
+    pub target_service: String,
+    pub target_port_number: Option<u32>,
+    pub target_port_name: Option<String>,
+    pub host: Option<String>,
+    pub path: String,
+    pub path_type: String,
+    pub tls_secret: Option<String>,
+    pub tls_hosts: Option<Vec<String>>,
+    pub annotations: Option<Vec<(String, String)>>,
+    pub ingress_class_name: String,
+    pub ingress_name: String,
+    pub ingress_namespace: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngressRouteResult {
+    pub route_id: String,
+    pub ingress_name: String,
+    pub namespace: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiscoveredRoute {
+    pub route_id: String,
+    pub field_id: String,
+    pub ingress_name: String,
+    pub ingress_namespace: String,
+    pub host: Option<String>,
+    pub path: String,
+    pub path_type: String,
+    pub target_service: String,
+    pub target_namespace: String,
+    pub target_port_number: Option<u32>,
+    pub target_port_name: Option<String>,
+    pub ingress_class_name: String,
+    pub tls_secret: Option<String>,
+    pub address: Option<String>,
+}
+
+// ─── Ingress Nginx Commands ───────────────────────────────────────────────────
+
+#[tauri::command]
+fn detect_ingress_nginx(namespace: String, release_name: String) -> IngressNginxStatus {
+    let ingress_class = run_kubectl(&[
+        "get", "ingressclass",
+        "-l", &format!("app.kubernetes.io/instance={}", release_name),
+        "-o", "jsonpath={.items[0].metadata.name}",
+    ])
+    .unwrap_or_else(|_| "nginx".to_string());
+    let ingress_class = if ingress_class.is_empty() { "nginx".to_string() } else { ingress_class };
+
+    let svc_name = run_kubectl(&[
+        "get", "service", "-n", &namespace,
+        "-l", &format!("app.kubernetes.io/instance={}", release_name),
+        "-o", "jsonpath={.items[0].metadata.name}",
+    ])
+    .unwrap_or_default();
+
+    let endpoint = if !svc_name.is_empty() {
+        let lb = run_kubectl(&[
+            "get", "service", &svc_name, "-n", &namespace,
+            "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
+        ]).ok().filter(|s| !s.is_empty());
+        if lb.is_some() { lb } else {
+            run_kubectl(&[
+                "get", "service", &svc_name, "-n", &namespace,
+                "-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}",
+            ]).ok().filter(|s| !s.is_empty())
+        }
+    } else { None };
+
+    IngressNginxStatus {
+        ingress_class_name: ingress_class,
+        controller_service_name: svc_name.clone(),
+        endpoint,
+        ready: !svc_name.is_empty(),
+    }
+}
+
+fn generate_ingress_yaml(route: &IngressRoute) -> String {
+    let port_spec = if let Some(n) = route.target_port_number {
+        format!("number: {}", n)
+    } else if let Some(name) = &route.target_port_name {
+        format!("name: {}", name)
+    } else {
+        "number: 80".to_string()
+    };
+
+    let host_rules = if let Some(host) = &route.host {
+        format!(
+"  rules:\n    - host: {host}\n      http:\n        paths:\n          - path: {path}\n            pathType: {pt}\n            backend:\n              service:\n                name: {svc}\n                port:\n                  {port}\n",
+            host=host, path=route.path, pt=route.path_type,
+            svc=route.target_service, port=port_spec)
+    } else {
+        format!(
+"  rules:\n    - http:\n        paths:\n          - path: {path}\n            pathType: {pt}\n            backend:\n              service:\n                name: {svc}\n                port:\n                  {port}\n",
+            path=route.path, pt=route.path_type,
+            svc=route.target_service, port=port_spec)
+    };
+
+    let tls_block = match (&route.tls_secret, &route.tls_hosts) {
+        (Some(secret), Some(hosts)) if !hosts.is_empty() => {
+            let hl: String = hosts.iter().map(|h| format!("        - {}\n", h)).collect();
+            format!("  tls:\n    - hosts:\n{}      secretName: {}\n", hl, secret)
+        }
+        _ => String::new(),
+    };
+
+    let mut ann = format!(
+        "    app.kubernetes.io/managed-by: endfield\n    endfield.io/fieldId: {}\n    endfield.io/routeId: {}\n",
+        route.field_id, route.route_id
+    );
+    if let Some(anns) = &route.annotations {
+        for (k, v) in anns { ann.push_str(&format!("    {}: {}\n", k, v)); }
+    }
+
+    format!(
+"apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: {name}\n  namespace: {ns}\n  labels:\n    app.kubernetes.io/managed-by: endfield\n    endfield.io/fieldId: {fid}\n    endfield.io/routeId: {rid}\n  annotations:\n{ann}spec:\n  ingressClassName: {class}\n{tls}{rules}",
+        name=route.ingress_name, ns=route.ingress_namespace,
+        fid=route.field_id, rid=route.route_id, ann=ann,
+        class=route.ingress_class_name, tls=tls_block, rules=host_rules)
+}
+
+#[tauri::command]
+async fn apply_ingress_route(route: IngressRoute) -> IngressRouteResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        let yaml = generate_ingress_yaml(&route);
+        let _ = ensure_namespace(&route.ingress_namespace);
+        match kubectl_apply_manifest(&yaml, &route.ingress_namespace) {
+            Ok(out) => IngressRouteResult {
+                route_id: route.route_id, ingress_name: route.ingress_name,
+                namespace: route.ingress_namespace, stdout: out,
+                stderr: String::new(), success: true,
+            },
+            Err(e) => IngressRouteResult {
+                route_id: route.route_id, ingress_name: route.ingress_name,
+                namespace: route.ingress_namespace, stdout: String::new(),
+                stderr: e, success: false,
+            },
+        }
+    }).await.unwrap_or_else(|e| IngressRouteResult {
+        route_id: String::new(), ingress_name: String::new(),
+        namespace: String::new(), stdout: String::new(),
+        stderr: format!("spawn error: {}", e), success: false,
+    })
+}
+
+#[tauri::command]
+fn get_ingress_route_yaml(route: IngressRoute) -> String {
+    generate_ingress_yaml(&route)
+}
+
+#[tauri::command]
+fn delete_ingress_route(ingress_name: String, namespace: String) -> Result<String, String> {
+    run_kubectl(&["delete", "ingress", &ingress_name, "-n", &namespace, "--ignore-not-found=true"])
+}
+
+#[tauri::command]
+fn discover_ingress_routes() -> Vec<DiscoveredRoute> {
+    let items_raw = match run_kubectl(&[
+        "get", "ingress", "--all-namespaces",
+        "-l", "app.kubernetes.io/managed-by=endfield",
+        "--no-headers", "-o",
+        "custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,CLASS:.spec.ingressClassName",
+    ]) {
+        Ok(o) => o,
+        Err(_) => return vec![],
+    };
+
+    let mut routes = Vec::new();
+    for line in items_raw.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 { continue; }
+        let ns = parts[0];
+        let name = parts[1];
+        let class = parts.get(2).copied().unwrap_or("nginx");
+
+        let field_id = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.metadata.annotations.endfield\\.io/fieldId}"])
+            .unwrap_or_default();
+        let route_id = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.metadata.annotations.endfield\\.io/routeId}"])
+            .unwrap_or_default();
+        if field_id.is_empty() || route_id.is_empty() { continue; }
+
+        let path = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.spec.rules[0].http.paths[0].path}"])
+            .unwrap_or_else(|_| "/".to_string());
+        let path_type = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.spec.rules[0].http.paths[0].pathType}"])
+            .unwrap_or_else(|_| "Prefix".to_string());
+        let host = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.spec.rules[0].host}"])
+            .ok().filter(|s| !s.is_empty());
+        let svc = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.spec.rules[0].http.paths[0].backend.service.name}"])
+            .unwrap_or_default();
+        let port_num: Option<u32> = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.spec.rules[0].http.paths[0].backend.service.port.number}"])
+            .ok().and_then(|s| s.parse().ok());
+        let port_name = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.spec.rules[0].http.paths[0].backend.service.port.name}"])
+            .ok().filter(|s| !s.is_empty());
+        let tls_secret = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.spec.tls[0].secretName}"])
+            .ok().filter(|s| !s.is_empty());
+        let address = run_kubectl(&["get", "ingress", name, "-n", ns,
+            "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}"])
+            .ok().filter(|s| !s.is_empty());
+
+        routes.push(DiscoveredRoute {
+            route_id, field_id, ingress_name: name.to_string(),
+            ingress_namespace: ns.to_string(), host,
+            path: if path.is_empty() { "/".to_string() } else { path },
+            path_type: if path_type.is_empty() { "Prefix".to_string() } else { path_type },
+            target_service: svc, target_namespace: ns.to_string(),
+            target_port_number: port_num, target_port_name: port_name,
+            ingress_class_name: class.to_string(), tls_secret, address,
+        });
+    }
+    routes
+}
+
+#[tauri::command]
+fn list_services_in_namespace(namespace: String) -> Vec<(String, Vec<String>)> {
+    let raw = run_kubectl(&[
+        "get", "services", "-n", &namespace, "--no-headers",
+        "-o", "custom-columns=NAME:.metadata.name,PORTS:.spec.ports[*].port",
+    ]).unwrap_or_default();
+    raw.lines().filter_map(|line| {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let name = parts.next()?.trim().to_string();
+        if name.is_empty() || name == "<none>" { return None; }
+        let ports_str = parts.next().unwrap_or("").trim();
+        let ports: Vec<String> = if ports_str == "<none>" { vec![] } else {
+            ports_str.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+        };
+        Some((name, ports))
+    }).collect()
+}
+
+#[tauri::command]
+fn list_namespaces() -> Vec<String> {
+    run_kubectl(&["get", "namespaces", "--no-headers",
+        "-o", "custom-columns=NAME:.metadata.name"])
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 // ─── File Watcher ─────────────────────────────────────────────────────────────
 
 /// Payload emitted to the frontend when a YAML file changes.
@@ -2899,6 +3169,14 @@ fn main() {
             // File watcher
             watch_project,
             unwatch_project,
+            // Ingress Nginx
+            detect_ingress_nginx,
+            apply_ingress_route,
+            get_ingress_route_yaml,
+            delete_ingress_route,
+            discover_ingress_routes,
+            list_services_in_namespace,
+            list_namespaces,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

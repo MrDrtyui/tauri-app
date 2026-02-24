@@ -6,6 +6,19 @@ import { DeleteConfirmDialog } from "../components/DeleteConfirmDialog";
 import { AddFieldModal } from "../components/AddFieldModal";
 import { executeCommand } from "../commands/commands";
 import { AppIcon, resolveNodeIconName, resolveNodeColor } from "../ui/AppIcon";
+import {
+  IngressRoute,
+  discoverIngressRoutes,
+  deleteIngressRoute,
+  getIngressRouteYaml,
+  routeEdgeLabel,
+  discoveredToRoute,
+} from "./ingressStore";
+import { IngressRouteModal } from "./IngressRouteModal";
+import {
+  IngressEdgeContextMenu,
+  EdgeContextMenuState,
+} from "./IngressEdgeContextMenu";
 
 // ─── Node type system — Catppuccin Mocha × macOS Tahoe ───────────
 //
@@ -357,6 +370,27 @@ export function GraphPanel() {
   const [renameValue, setRenameValue] = useState("");
   const [showAddField, setShowAddField] = useState(false);
 
+  // ── Ingress Route state ───────────────────────────────────────
+  const [routes, setRoutes] = useState<IngressRoute[]>([]);
+  const [routeModal, setRouteModal] = useState<{
+    fieldId: string;
+    ingressClassName: string;
+    existing?: IngressRoute;
+  } | null>(null);
+  const [edgeCtxMenu, setEdgeCtxMenu] = useState<EdgeContextMenuState | null>(
+    null,
+  );
+  const [yamlView, setYamlView] = useState<string | null>(null);
+  const [deleteRouteTarget, setDeleteRouteTarget] =
+    useState<IngressRoute | null>(null);
+
+  // Discover managed ingress routes on mount
+  useEffect(() => {
+    discoverIngressRoutes()
+      .then((discovered) => setRoutes(discovered.map(discoveredToRoute)))
+      .catch(() => {});
+  }, []);
+
   const namespace = storeNodes[0]?.namespace ?? "default";
   const canvasRef = useRef<HTMLDivElement>(null);
   const fittedRef = useRef(false);
@@ -421,6 +455,26 @@ export function GraphPanel() {
     },
     [],
   );
+
+  // ── IngressNginx node helpers ─────────────────────────────────
+  const isIngressNode = (node: YamlNode) =>
+    node.type_id === "gateway" &&
+    (node.kind === "HelmRelease" ||
+      node.label.toLowerCase().includes("ingress") ||
+      node.label.toLowerCase().includes("nginx"));
+
+  const getIngressClassName = (node: YamlNode): string => {
+    // Derive class from helm chart name or fallback to "nginx"
+    if (node.helm?.chart_name?.includes("ingress-nginx")) return "nginx";
+    return "nginx";
+  };
+
+  const handleCreateRoute = useCallback((node: YamlNode) => {
+    setRouteModal({
+      fieldId: node.id,
+      ingressClassName: getIngressClassName(node),
+    });
+  }, []);
 
   // ── Canvas pan ───────────────────────────────────────────────
   const panState = useRef<{
@@ -564,6 +618,105 @@ export function GraphPanel() {
         </div>
       )}
 
+      {/* Ingress route edges — SVG layer */}
+      <svg
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          pointerEvents: "none",
+          overflow: "visible",
+          zIndex: 1,
+        }}
+      >
+        <defs>
+          <marker
+            id="ingress-arrow"
+            markerWidth="8"
+            markerHeight="8"
+            refX="6"
+            refY="3"
+            orient="auto"
+          >
+            <path d="M0,0 L0,6 L8,3 z" fill="#89b4fa" opacity={0.7} />
+          </marker>
+        </defs>
+        {routes.map((route) => {
+          // Find source node (ingress controller) and target node (service)
+          const srcNode = storeNodes.find((n) => n.id === route.field_id);
+          const tgtNode = storeNodes.find(
+            (n) =>
+              n.label === route.target_service &&
+              n.namespace === route.target_namespace,
+          );
+          if (!srcNode || !tgtNode) return null;
+
+          const srcPos = localPos[srcNode.id] ?? { x: srcNode.x, y: srcNode.y };
+          const tgtPos = localPos[tgtNode.id] ?? { x: tgtNode.x, y: tgtNode.y };
+
+          // Node dimensions: 158 × ~88
+          const nodeW = 158,
+            nodeH = 88;
+
+          // Source: right center, Target: left center
+          const x1 = pan.x + (srcPos.x + nodeW) * zoom;
+          const y1 = pan.y + (srcPos.y + nodeH / 2) * zoom;
+          const x2 = pan.x + tgtPos.x * zoom;
+          const y2 = pan.y + (tgtPos.y + nodeH / 2) * zoom;
+
+          // Cubic bezier
+          const cx1 = x1 + 60 * zoom;
+          const cx2 = x2 - 60 * zoom;
+
+          const label = routeEdgeLabel(route);
+          const midX = (x1 + x2) / 2;
+          const midY = (y1 + y2) / 2 - 12 * zoom;
+
+          return (
+            <g
+              key={route.route_id}
+              style={{ pointerEvents: "all", cursor: "pointer" }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setEdgeCtxMenu({ route, x: e.clientX, y: e.clientY });
+              }}
+            >
+              {/* Wider invisible hit area */}
+              <path
+                d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={14}
+              />
+              {/* Visible edge */}
+              <path
+                d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
+                fill="none"
+                stroke="#89b4fa"
+                strokeWidth={1.5}
+                strokeOpacity={0.55}
+                strokeDasharray="6,4"
+                markerEnd="url(#ingress-arrow)"
+              />
+              {/* Edge label */}
+              <text
+                x={midX}
+                y={midY}
+                textAnchor="middle"
+                fill="#89b4fa"
+                fontSize={10 * zoom}
+                fontFamily="var(--font-mono)"
+                opacity={0.75}
+                style={{ userSelect: "none" }}
+              >
+                {label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+
       {/* Nodes */}
       <div
         style={{
@@ -660,6 +813,50 @@ export function GraphPanel() {
         />
       )}
 
+      {/* IngressNginx "Create Route" floating button — shown when node selected */}
+      {selectedId &&
+        (() => {
+          const node = storeNodes.find((n) => n.id === selectedId);
+          if (!node || !isIngressNode(node)) return null;
+          const pos = getNodePos(node);
+          return (
+            <div
+              style={{
+                position: "absolute",
+                left: pan.x + pos.x * zoom,
+                top: pan.y + (pos.y + 96) * zoom,
+                transform: `scale(${zoom})`,
+                transformOrigin: "top left",
+                zIndex: 20,
+                pointerEvents: "all",
+              }}
+            >
+              <button
+                onClick={() => handleCreateRoute(node)}
+                style={{
+                  background: "rgba(137,180,250,0.14)",
+                  border: "1px solid rgba(137,180,250,0.4)",
+                  borderRadius: "var(--radius-sm)",
+                  color: "#89b4fa",
+                  cursor: "pointer",
+                  fontSize: "var(--font-size-xs)",
+                  fontFamily: "var(--font-ui)",
+                  fontWeight: 500,
+                  padding: "3px 10px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  whiteSpace: "nowrap",
+                  boxShadow: "var(--shadow-sm)",
+                }}
+              >
+                <AppIcon name="add" size={10} strokeWidth={2.5} />
+                Create Route
+              </button>
+            </div>
+          );
+        })()}
+
       {deleteTarget && (
         <DeleteConfirmDialog
           node={deleteTarget}
@@ -677,6 +874,247 @@ export function GraphPanel() {
           }}
           onClose={() => setShowAddField(false)}
         />
+      )}
+
+      {/* Ingress Route Modal (create/edit) */}
+      {routeModal && (
+        <IngressRouteModal
+          fieldId={routeModal.fieldId}
+          ingressClassName={routeModal.ingressClassName}
+          existing={routeModal.existing}
+          onSave={(route) => {
+            setRoutes((prev) => {
+              const idx = prev.findIndex((r) => r.route_id === route.route_id);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = route;
+                return next;
+              }
+              return [...prev, route];
+            });
+            setRouteModal(null);
+          }}
+          onClose={() => setRouteModal(null)}
+        />
+      )}
+
+      {/* Edge right-click context menu */}
+      {edgeCtxMenu && (
+        <IngressEdgeContextMenu
+          state={edgeCtxMenu}
+          onClose={() => setEdgeCtxMenu(null)}
+          onEdit={(route) => {
+            const srcNode = storeNodes.find((n) => n.id === route.field_id);
+            setRouteModal({
+              fieldId: route.field_id,
+              ingressClassName: srcNode
+                ? getIngressClassName(srcNode)
+                : route.ingress_class_name,
+              existing: route,
+            });
+          }}
+          onDelete={(route) => setDeleteRouteTarget(route)}
+          onViewYaml={async (route) => {
+            try {
+              const yaml = await getIngressRouteYaml(route);
+              setYamlView(yaml);
+            } catch {
+              setYamlView("# Error generating YAML");
+            }
+          }}
+          onJumpToService={(route) => {
+            const tgtNode = storeNodes.find(
+              (n) =>
+                n.label === route.target_service &&
+                n.namespace === route.target_namespace,
+            );
+            if (tgtNode) {
+              setSelectedId(tgtNode.id);
+              executeCommand("field.properties", { node: tgtNode });
+            }
+          }}
+        />
+      )}
+
+      {/* Delete route confirmation */}
+      {deleteRouteTarget && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            zIndex: 10001,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            style={{
+              background: "var(--bg-modal)",
+              border: "1px solid var(--border-default)",
+              borderRadius: "var(--radius-lg)",
+              padding: 24,
+              width: 360,
+              boxShadow: "var(--shadow-lg)",
+              fontFamily: "var(--font-ui)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 16,
+            }}
+          >
+            <div style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+              Delete Ingress Route?
+            </div>
+            <div
+              style={{
+                color: "var(--text-secondary)",
+                fontSize: "var(--font-size-sm)",
+              }}
+            >
+              This will delete the Kubernetes Ingress resource{" "}
+              <code
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--ctp-red)",
+                }}
+              >
+                {deleteRouteTarget.ingress_name}
+              </code>{" "}
+              in namespace{" "}
+              <code style={{ fontFamily: "var(--font-mono)" }}>
+                {deleteRouteTarget.ingress_namespace}
+              </code>
+              .
+            </div>
+            <div
+              style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
+            >
+              <button
+                onClick={() => setDeleteRouteTarget(null)}
+                style={{
+                  background: "transparent",
+                  border: "1px solid var(--border-default)",
+                  borderRadius: "var(--radius-sm)",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  padding: "5px 14px",
+                  fontFamily: "var(--font-ui)",
+                  fontSize: "var(--font-size-sm)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await deleteIngressRoute(
+                      deleteRouteTarget.ingress_name,
+                      deleteRouteTarget.ingress_namespace,
+                    );
+                  } catch {
+                    /* ignore */
+                  }
+                  setRoutes((prev) =>
+                    prev.filter(
+                      (r) => r.route_id !== deleteRouteTarget!.route_id,
+                    ),
+                  );
+                  setDeleteRouteTarget(null);
+                }}
+                style={{
+                  background: "rgba(243,139,168,0.12)",
+                  border: "1px solid rgba(243,139,168,0.35)",
+                  borderRadius: "var(--radius-sm)",
+                  color: "var(--ctp-red)",
+                  cursor: "pointer",
+                  padding: "5px 14px",
+                  fontFamily: "var(--font-ui)",
+                  fontSize: "var(--font-size-sm)",
+                  fontWeight: 500,
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* YAML viewer modal */}
+      {yamlView !== null && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            zIndex: 10001,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setYamlView(null);
+          }}
+        >
+          <div
+            style={{
+              background: "var(--bg-modal)",
+              border: "1px solid var(--border-default)",
+              borderRadius: "var(--radius-lg)",
+              padding: 24,
+              width: 600,
+              maxWidth: "90vw",
+              maxHeight: "80vh",
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              boxShadow: "var(--shadow-lg)",
+              fontFamily: "var(--font-ui)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <div style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                Generated Ingress YAML
+              </div>
+              <button
+                onClick={() => setYamlView(null)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--text-faint)",
+                  cursor: "pointer",
+                  display: "flex",
+                }}
+              >
+                <AppIcon name="close" size={16} strokeWidth={2} />
+              </button>
+            </div>
+            <pre
+              style={{
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: "var(--radius-sm)",
+                padding: 12,
+                overflowY: "auto",
+                flex: 1,
+                margin: 0,
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                color: "var(--text-secondary)",
+                whiteSpace: "pre",
+              }}
+            >
+              {yamlView}
+            </pre>
+          </div>
+        </div>
       )}
     </div>
   );
