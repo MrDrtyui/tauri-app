@@ -266,14 +266,19 @@ function PodRow({
 
 // ─── InspectorPanel ───────────────────────────────────────────────
 
+const SPIN_STYLE = `@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`;
+
 export function InspectorPanel() {
+  console.log("[InspectorPanel] RENDER");
   const selectedEntity = useIDEStore((s) => s.selectedEntity);
   const openTab = useIDEStore((s) => s.openTab);
   const nodes = useIDEStore((s) => s.nodes);
   const clusterStatus = useIDEStore((s) => s.clusterStatus);
+  const refreshClusterStatus = useIDEStore((s) => s.refreshClusterStatus);
 
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [pulsing, setPulsing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const { type, id, label, filePath } = selectedEntity ?? {};
 
@@ -333,6 +338,28 @@ export function InspectorPanel() {
     };
   }, [id, filePath]);
 
+  // For helm nodes: refresh cluster status immediately on selection AND
+  // keep a short-lived 2s interval to catch the first response quickly.
+  // This avoids stale-closure issues and ensures pods appear without
+  // having to re-open the project.
+  useEffect(() => {
+    const source = (selectedEntity as any)?.meta?.source ?? node?.source;
+    if (source !== "helm") return;
+
+    // Immediate refresh
+    refreshClusterStatus().catch(() => {});
+
+    // Poll every 2 s for up to 10 s in case the first call is slow
+    let ticks = 0;
+    const iv = setInterval(() => {
+      ticks++;
+      refreshClusterStatus().catch(() => {});
+      if (ticks >= 5) clearInterval(iv);
+    }, 2000);
+
+    return () => clearInterval(iv);
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!selectedEntity || selectedEntity.type === "none") {
     return <EmptyInspector />;
   }
@@ -348,6 +375,7 @@ export function InspectorPanel() {
         color: "var(--text-secondary)",
       }}
     >
+      <style>{SPIN_STYLE}</style>
       {/* ── Header ── */}
       <div
         style={{
@@ -538,23 +566,52 @@ export function InspectorPanel() {
         )}
 
         {/* Helm pods — all deployments/pods that belong to this helm release */}
+        {
+          console.log(
+            "[helm-inspect] node:",
+            node?.id,
+            "source:",
+            node?.source,
+            "helm:",
+            !!node?.helm,
+            "clusterStatus:",
+            !!clusterStatus,
+            "fields:",
+            clusterStatus?.fields?.length,
+          ) as unknown as null
+        }
         {node?.source === "helm" &&
-          node.helm &&
           (() => {
-            const releaseName = node.helm.release_name;
-            const releaseNs = node.helm.namespace || node.namespace;
-            // Collect all FieldStatus entries whose label starts with the release name
-            // (helm typically names resources as "<release>-<chart>" or just "<release>")
+            const releaseName = node.helm?.release_name ?? node.label;
+
+            // Match workloads from cluster status to this helm release.
+            // We intentionally skip namespace filtering here because the namespace
+            // stored on the node (from namespace.yaml or fallback "infra-<release>")
+            // often doesn't match the real Kubernetes namespace where pods run.
+            // Instead we match purely by release name (bidirectional prefix/contains).
             const helmFields =
               clusterStatus?.fields.filter((f) => {
-                const nsMatch = !releaseNs || f.namespace === releaseNs;
+                const n = f.label.toLowerCase();
+                const r = releaseName.toLowerCase();
                 return (
-                  nsMatch &&
-                  (f.label === releaseName ||
-                    f.label.startsWith(releaseName + "-") ||
-                    f.label.startsWith(releaseName + "_"))
+                  n === r ||
+                  n.startsWith(r + "-") ||
+                  n.startsWith(r + "_") ||
+                  r.startsWith(n + "-") ||
+                  r.startsWith(n + "_") ||
+                  n.includes(r) ||
+                  r.includes(n)
                 );
               }) ?? [];
+
+            console.log(
+              "[helm-inspect] releaseName:",
+              releaseName,
+              "clusterStatus fields:",
+              clusterStatus?.fields?.map((f) => f.label + "@" + f.namespace),
+              "helmFields found:",
+              helmFields.length,
+            );
 
             // Collect all pods from those fields (dedup by pod name)
             const seenPods = new Set<string>();
@@ -566,12 +623,11 @@ export function InspectorPanel() {
                 return true;
               });
 
-            if (allPods.length === 0 && helmFields.length === 0) return null;
-
             const totalReady = helmFields.reduce((s, f) => s + f.ready, 0);
             const totalDesired = helmFields.reduce((s, f) => s + f.desired, 0);
-            const overallStatus =
-              totalDesired === 0
+            const overallStatus = !clusterStatus
+              ? "gray"
+              : totalDesired === 0
                 ? "gray"
                 : totalReady === totalDesired
                   ? "green"
@@ -579,37 +635,156 @@ export function InspectorPanel() {
                     ? "red"
                     : "yellow";
 
+            const handleRefresh = async () => {
+              setRefreshing(true);
+              try {
+                await refreshClusterStatus();
+              } catch {
+                /* ignore */
+              }
+              setRefreshing(false);
+            };
+
             return (
               <Section title="Helm Release">
-                <PropRow label="Release" value={releaseName} mono />
-                <PropRow
-                  label="Status"
-                  value={<StatusBadge status={overallStatus} />}
-                />
-                <PropRow
-                  label="Ready"
-                  value={`${totalReady} / ${totalDesired}`}
-                />
-                {helmFields.length > 1 && (
-                  <PropRow
-                    label="Workloads"
-                    value={helmFields.map((f) => f.label).join(", ")}
-                    mono
-                  />
-                )}
-                {allPods.length > 0 && (
+                {/* Release name + refresh button in one row */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 10,
+                  }}
+                >
                   <div
                     style={{
-                      marginTop: 6,
-                      border: "1px solid var(--border-subtle)",
-                      borderRadius: "var(--radius-sm)",
-                      overflow: "hidden",
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 10,
                     }}
                   >
-                    {allPods.map((pod, i) => (
-                      <PodRow key={pod.name} pod={pod} index={i} />
-                    ))}
+                    <span
+                      style={{
+                        color: "var(--text-subtle)",
+                        fontSize: "var(--font-size-xs)",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.07em",
+                        flexShrink: 0,
+                        paddingTop: 1,
+                        width: 76,
+                        fontWeight: 500,
+                      }}
+                    >
+                      Release
+                    </span>
+                    <span
+                      style={{
+                        color: "var(--text-secondary)",
+                        fontSize: "var(--font-size-sm)",
+                        fontFamily: "var(--font-mono)",
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {releaseName}
+                    </span>
                   </div>
+                  <button
+                    onClick={handleRefresh}
+                    disabled={refreshing}
+                    title="Refresh cluster status"
+                    style={{
+                      background: "transparent",
+                      border: "1px solid var(--border-subtle)",
+                      borderRadius: "var(--radius-xs)",
+                      color: refreshing
+                        ? "var(--text-faint)"
+                        : "var(--text-subtle)",
+                      cursor: refreshing ? "default" : "pointer",
+                      padding: "2px 7px",
+                      fontSize: "var(--font-size-xs)",
+                      fontFamily: "var(--font-ui)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                      flexShrink: 0,
+                      transition: "var(--ease-fast)",
+                    }}
+                  >
+                    <AppIcon
+                      name="refresh"
+                      size={10}
+                      strokeWidth={2}
+                      style={{
+                        animation: refreshing
+                          ? "spin 1s linear infinite"
+                          : "none",
+                      }}
+                    />
+                    {refreshing || !clusterStatus ? "…" : "Refresh"}
+                  </button>
+                </div>
+
+                {!clusterStatus && (
+                  <div
+                    style={{
+                      color: "var(--text-faint)",
+                      fontSize: "var(--font-size-xs)",
+                      fontFamily: "var(--font-mono)",
+                      marginBottom: 8,
+                    }}
+                  >
+                    Loading cluster status…
+                  </div>
+                )}
+
+                {clusterStatus && helmFields.length === 0 && (
+                  <div
+                    style={{
+                      color: "var(--text-faint)",
+                      fontSize: "var(--font-size-xs)",
+                      fontFamily: "var(--font-mono)",
+                      marginBottom: 8,
+                    }}
+                  >
+                    No running workloads found for{" "}
+                    <span style={{ color: "var(--text-subtle)" }}>
+                      {releaseName}
+                    </span>
+                  </div>
+                )}
+
+                {helmFields.length > 0 && (
+                  <>
+                    <PropRow
+                      label="Status"
+                      value={<StatusBadge status={overallStatus} />}
+                    />
+                    <PropRow
+                      label="Ready"
+                      value={`${totalReady} / ${totalDesired}`}
+                    />
+                    {helmFields.length > 1 && (
+                      <PropRow
+                        label="Workloads"
+                        value={helmFields.map((f) => f.label).join(", ")}
+                        mono
+                      />
+                    )}
+                    {allPods.length > 0 && (
+                      <div
+                        style={{
+                          marginTop: 6,
+                          border: "1px solid var(--border-subtle)",
+                          borderRadius: "var(--radius-sm)",
+                          overflow: "hidden",
+                        }}
+                      >
+                        {allPods.map((pod, i) => (
+                          <PodRow key={pod.name} pod={pod} index={i} />
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </Section>
             );

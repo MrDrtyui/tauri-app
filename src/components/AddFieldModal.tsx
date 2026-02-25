@@ -958,6 +958,15 @@ export function AddFieldModal({ onClose, namespace }: Props) {
         file_path: `${projectPath}/infra/${n}/helm/Chart.yaml`,
         replicas: null,
         source: "helm",
+        helm: {
+          release_name: n,
+          namespace: genResult.namespace,
+          chart_name: helmPreset.chartName,
+          chart_version: helmPreset.version,
+          repo: helmPreset.repo,
+          values_path: `${projectPath}/infra/${n}/helm/values.yaml`,
+          rendered_dir: `${projectPath}/infra/${n}/rendered`,
+        },
         x: 20 + Math.random() * 40,
         y: 20 + Math.random() * 40,
       });

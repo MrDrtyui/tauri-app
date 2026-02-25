@@ -44,7 +44,7 @@ export default function App() {
   useEffect(() => {
     if (!projectPath) return;
     refreshClusterStatus();
-    const id = setInterval(refreshClusterStatus, 10_000);
+    const id = setInterval(refreshClusterStatus, 3_000);
     return () => clearInterval(id);
   }, [projectPath, refreshClusterStatus]);
 
