@@ -14,6 +14,7 @@ interface ContextMenuProps {
   state: ContextMenuState;
   onClose: () => void;
   onRename: (node: YamlNode) => void;
+  onEdit: (node: YamlNode) => void;
   onDelete: (node: YamlNode) => void;
 }
 
@@ -21,6 +22,7 @@ export function ContextMenu({
   state,
   onClose,
   onRename,
+  onEdit,
   onDelete,
 }: ContextMenuProps) {
   const { node, x, y } = state;
@@ -77,10 +79,19 @@ export function ContextMenu({
       },
     },
     {
+      id: "edit",
+      label: "Edit & Redeploy",
+      icon: "deployImage" as const,
+      dividerBefore: true,
+      action: () => {
+        onEdit(node);
+        onClose();
+      },
+    },
+    {
       id: "rename",
       label: "Rename",
       icon: "rename" as const,
-      dividerBefore: true,
       action: () => {
         onRename(node);
         onClose();

@@ -10,6 +10,7 @@ import {
 import { genId } from "../layout/utils";
 import { ContextMenu, ContextMenuState } from "../components/ContextMenu";
 import { DeleteConfirmDialog } from "../components/DeleteConfirmDialog";
+import { EditFieldModal } from "../components/EditFieldModal";
 import { executeCommand } from "../commands/commands";
 import {
   ExplorerIcon,
@@ -1198,6 +1199,7 @@ export function ExplorerPanel() {
   const [search, setSearch] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<YamlNode | null>(null);
+  const [editTarget, setEditTarget] = useState<YamlNode | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [searchFocus, setSearchFocus] = useState(false);
@@ -1512,6 +1514,10 @@ export function ExplorerPanel() {
             startRename(node);
             setContextMenu(null);
           }}
+          onEdit={(node) => {
+            setEditTarget(node);
+            setContextMenu(null);
+          }}
           onDelete={(node) => {
             setDeleteTarget(node);
             setContextMenu(null);
@@ -1524,6 +1530,10 @@ export function ExplorerPanel() {
           node={deleteTarget}
           onClose={() => setDeleteTarget(null)}
         />
+      )}
+
+      {editTarget && (
+        <EditFieldModal node={editTarget} onClose={() => setEditTarget(null)} />
       )}
     </div>
   );

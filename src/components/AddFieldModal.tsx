@@ -1004,6 +1004,41 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     try {
       const res = await deployImage(request);
       if (res.success) {
+        // Save manifests to disk so deletion, editing and file watcher all work
+        const fieldDir = `${projectPath}/apps/${n}`;
+        const saves: Promise<void>[] = [];
+        if (res.manifests.namespace) {
+          saves.push(
+            saveYamlFile(
+              `${fieldDir}/namespace.yaml`,
+              res.manifests.namespace,
+            ).catch(() => {}),
+          );
+        }
+        if (res.manifests.secret) {
+          saves.push(
+            saveYamlFile(
+              `${fieldDir}/${n}-secret.yaml`,
+              res.manifests.secret,
+            ).catch(() => {}),
+          );
+        }
+        saves.push(
+          saveYamlFile(
+            `${fieldDir}/deployment.yaml`,
+            res.manifests.deployment,
+          ).catch(() => {}),
+        );
+        if (res.manifests.service) {
+          saves.push(
+            saveYamlFile(
+              `${fieldDir}/service.yaml`,
+              res.manifests.service,
+            ).catch(() => {}),
+          );
+        }
+        await Promise.all(saves);
+
         setResult("OK: Deployed");
         addNode({
           id: genId("node"),
@@ -1012,7 +1047,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
           image: imgImage.trim(),
           type_id: "service",
           namespace: imgNamespace,
-          file_path: "",
+          file_path: `${fieldDir}/deployment.yaml`,
           replicas: imgReplicas,
           source: "raw",
           x: 20 + Math.random() * 40,

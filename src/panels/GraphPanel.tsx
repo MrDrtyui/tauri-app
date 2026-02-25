@@ -1,8 +1,9 @@
 import React, { useCallback, useRef, useState, useEffect } from "react";
 import { useIDEStore } from "../store/ideStore";
-import { YamlNode } from "../store/tauriStore";
+import { YamlNode, saveYamlFile, deleteFieldFiles } from "../store/tauriStore";
 import { ContextMenu, ContextMenuState } from "../components/ContextMenu";
 import { DeleteConfirmDialog } from "../components/DeleteConfirmDialog";
+import { EditFieldModal } from "../components/EditFieldModal";
 import { AddFieldModal } from "../components/AddFieldModal";
 import { executeCommand } from "../commands/commands";
 import { AppIcon, resolveNodeIconName, resolveNodeColor } from "../ui/AppIcon";
@@ -366,6 +367,7 @@ export function GraphPanel() {
   >({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<YamlNode | null>(null);
+  const [editTarget, setEditTarget] = useState<YamlNode | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [showAddField, setShowAddField] = useState(false);
@@ -806,6 +808,10 @@ export function GraphPanel() {
             startRename(node);
             setContextMenu(null);
           }}
+          onEdit={(node) => {
+            setEditTarget(node);
+            setContextMenu(null);
+          }}
           onDelete={(node) => {
             setDeleteTarget(node);
             setContextMenu(null);
@@ -864,6 +870,10 @@ export function GraphPanel() {
         />
       )}
 
+      {editTarget && (
+        <EditFieldModal node={editTarget} onClose={() => setEditTarget(null)} />
+      )}
+
       {showAddField && projectPath && (
         <AddFieldModal
           projectPath={projectPath}
@@ -892,6 +902,29 @@ export function GraphPanel() {
               }
               return [...prev, route];
             });
+            // Save YAML to disk so the route survives across project reloads
+            // and can be managed like any other manifest
+            if (projectPath) {
+              getIngressRouteYaml(route)
+                .then((yaml) => {
+                  const ingressNode = storeNodes.find(
+                    (n) => n.id === route.field_id,
+                  );
+                  const ingressDir = ingressNode?.file_path
+                    ? ingressNode.file_path.substring(
+                        0,
+                        ingressNode.file_path.lastIndexOf("/helm/"),
+                      )
+                    : `${projectPath}/infra/${route.field_id}`;
+                  return saveYamlFile(
+                    `${ingressDir}/routes/${route.ingress_name}.yaml`,
+                    yaml,
+                  );
+                })
+                .catch((e) =>
+                  console.warn("[ingress] failed to save route yaml:", e),
+                );
+            }
             setRouteModal(null);
           }}
           onClose={() => setRouteModal(null)}
@@ -1012,6 +1045,23 @@ export function GraphPanel() {
                       deleteRouteTarget.ingress_name,
                       deleteRouteTarget.ingress_namespace,
                     );
+                    // Also delete the saved YAML file from disk
+                    if (projectPath) {
+                      const ingressNode = storeNodes.find(
+                        (n) => n.id === deleteRouteTarget!.field_id,
+                      );
+                      const ingressDir = ingressNode?.file_path
+                        ? ingressNode.file_path.substring(
+                            0,
+                            ingressNode.file_path.lastIndexOf("/helm/"),
+                          )
+                        : `${projectPath}/infra/${deleteRouteTarget!.field_id}`;
+                      const routeFile = `${ingressDir}/routes/${deleteRouteTarget!.ingress_name}.yaml`;
+                      deleteFieldFiles(
+                        [routeFile],
+                        deleteRouteTarget!.ingress_namespace,
+                      ).catch(() => {});
+                    }
                   } catch {
                     /* ignore */
                   }
