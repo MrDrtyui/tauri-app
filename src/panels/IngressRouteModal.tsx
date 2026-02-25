@@ -173,6 +173,18 @@ export function IngressRouteModal({
   const [host, setHost] = useState(existing?.host ?? "");
   const [path, setPath] = useState(existing?.path ?? "/");
   const [pathType, setPathType] = useState(existing?.path_type ?? "Prefix");
+  // Detect if existing route already uses rewrite
+  const existingAnns = existing?.annotations ?? [];
+  const [rewrite, setRewrite] = useState(
+    existingAnns.some(
+      ([k]) => k === "nginx.ingress.kubernetes.io/rewrite-target",
+    ),
+  );
+  const [rewriteTarget, setRewriteTarget] = useState(
+    existingAnns.find(
+      ([k]) => k === "nginx.ingress.kubernetes.io/rewrite-target",
+    )?.[1] ?? "/",
+  );
   const [tlsSecret, setTlsSecret] = useState(existing?.tls_secret ?? "");
   const [tlsHosts, setTlsHosts] = useState(
     existing?.tls_hosts?.join(", ") ?? "",
@@ -263,6 +275,29 @@ export function IngressRouteModal({
       .map((h) => h.trim())
       .filter(Boolean);
 
+    // Build final annotations: merge rewrite annotations with manual ones
+    const rewriteAnns: [string, string][] = rewrite
+      ? [
+          ["nginx.ingress.kubernetes.io/rewrite-target", rewriteTarget || "/"],
+          ["nginx.ingress.kubernetes.io/use-regex", "true"],
+        ]
+      : [];
+    const manualAnns: [string, string][] = annRaw.trim()
+      ? parseAnnotations()
+      : [];
+    // manual annotations take priority over rewrite ones
+    const rewriteKeys = new Set(rewriteAnns.map(([k]) => k));
+    const mergedAnns: [string, string][] = [
+      ...rewriteAnns,
+      ...manualAnns.filter(([k]) => !rewriteKeys.has(k)),
+    ];
+
+    // If rewrite is on and path doesn't end with capture group, auto-append (.*)
+    const finalPath =
+      rewrite && !path.includes("(.*)")
+        ? path.replace(/\/$/, "") + "(/|$)(.*)"
+        : path;
+
     const route: IngressRoute = {
       route_id: routeId,
       field_id: fieldId,
@@ -271,11 +306,11 @@ export function IngressRouteModal({
       target_port_number: portNum ? parseInt(portNum, 10) : null,
       target_port_name: portNum ? null : portName || null,
       host: host || null,
-      path,
-      path_type: pathType,
+      path: finalPath,
+      path_type: rewrite ? "ImplementationSpecific" : pathType,
       tls_secret: tlsSecret || null,
       tls_hosts: parsedTlsHosts.length > 0 ? parsedTlsHosts : null,
-      annotations: annRaw.trim() ? parseAnnotations() : null,
+      annotations: mergedAnns.length > 0 ? mergedAnns : null,
       ingress_class_name: overrideClass || ingressClassName,
       ingress_name: ingressName,
       ingress_namespace: ingressNs || targetNs,
@@ -517,6 +552,153 @@ export function IngressRouteModal({
                 options={["Prefix", "Exact", "ImplementationSpecific"]}
               />
             </Field>
+          </div>
+
+          {/* Rewrite toggle */}
+          <div
+            style={{
+              borderRadius: "var(--radius-md)",
+              border: `1px solid ${rewrite ? "rgba(166,227,161,0.25)" : "var(--border-subtle)"}`,
+              background: rewrite
+                ? "rgba(166,227,161,0.04)"
+                : "var(--bg-surface)",
+              padding: "10px 12px",
+              transition: "all 0.15s ease",
+            }}
+          >
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                cursor: "pointer",
+                userSelect: "none",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={rewrite}
+                onChange={(e) => setRewrite(e.target.checked)}
+                style={{
+                  accentColor: "var(--ctp-green)",
+                  cursor: "pointer",
+                  width: 13,
+                  height: 13,
+                }}
+              />
+              <span
+                style={{
+                  color: "var(--text-secondary)",
+                  fontSize: "var(--font-size-sm)",
+                  fontWeight: 500,
+                }}
+              >
+                Rewrite path
+              </span>
+              <span
+                style={{
+                  color: "var(--text-faint)",
+                  fontSize: "var(--font-size-xs)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                nginx.ingress.kubernetes.io/rewrite-target
+              </span>
+            </label>
+
+            {rewrite && (
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span
+                    style={{
+                      color: "var(--text-faint)",
+                      fontSize: "var(--font-size-xs)",
+                      fontFamily: "var(--font-mono)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    rewrite-target:
+                  </span>
+                  <input
+                    value={rewriteTarget}
+                    onChange={(e) => setRewriteTarget(e.target.value)}
+                    placeholder="/$2"
+                    style={{
+                      background: "var(--bg-elevated)",
+                      border: "1px solid var(--border-default)",
+                      borderRadius: "var(--radius-xs)",
+                      color: "var(--ctp-green)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "var(--font-size-xs)",
+                      padding: "4px 8px",
+                      outline: "none",
+                      width: 80,
+                    }}
+                  />
+                </div>
+                <div
+                  style={{
+                    color: "var(--text-faint)",
+                    fontSize: "var(--font-size-xs)",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  Path{" "}
+                  <code
+                    style={{
+                      color: "var(--ctp-green)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    {path}
+                  </code>{" "}
+                  → will become{" "}
+                  <code
+                    style={{
+                      color: "var(--ctp-green)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    {path.replace(/\/$/, "") + "(/|$)(.*)"}
+                  </code>{" "}
+                  with{" "}
+                  <code
+                    style={{
+                      color: "var(--ctp-green)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    use-regex: true
+                  </code>
+                  . Use{" "}
+                  <code
+                    style={{
+                      color: "var(--ctp-peach)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    /$2
+                  </code>{" "}
+                  to strip the prefix,{" "}
+                  <code
+                    style={{
+                      color: "var(--ctp-peach)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    /
+                  </code>{" "}
+                  to always rewrite to root.
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

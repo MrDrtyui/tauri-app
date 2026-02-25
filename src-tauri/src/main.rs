@@ -1123,13 +1123,9 @@ fn generate_field(mut config: FieldConfig) -> GenerateResult {
     let mut generated_files: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    // Auto-derive namespace if empty
+    // Auto-derive namespace if empty — all apps go to "apps" namespace
     if config.namespace.is_empty() {
-        let project_name = Path::new(&config.project_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project");
-        config.namespace = format!("{}-{}", project_name, config.id);
+        config.namespace = "apps".to_string();
     }
 
     let field_dir = Path::new(&config.project_path)
@@ -2458,16 +2454,19 @@ fn gen_image_deployment(req: &DeployImageRequest) -> String {
     let ns = &req.namespace;
     let secret_name = format!("{}-secrets", name);
 
-    // ports block
+    // ports block — always include name (required by K8s when >1 port)
     let ports_yaml = if req.ports.is_empty() {
         String::new()
     } else {
         let lines: String = req.ports.iter().map(|p| {
-            let name_line = match &p.name {
-                Some(n) if !n.is_empty() => format!("              name: {}\n", n),
-                _ => String::new(),
+            let port_name = match &p.name {
+                Some(n) if !n.is_empty() => n.clone(),
+                _ => format!("port-{}", p.container_port),
             };
-            format!("            - containerPort: {}\n{}", p.container_port, name_line)
+            format!("            - containerPort: {port}\n              name: {name}\n",
+                port = p.container_port,
+                name = port_name,
+            )
         }).collect();
         format!("          ports:\n{}", lines)
     };
@@ -2567,16 +2566,17 @@ spec:
 
 fn gen_image_service(name: &str, ns: &str, ports: &[DeployPort], service_type: &str) -> String {
     let port_lines: String = ports.iter().map(|p| {
-        let name_line = match &p.name {
-            Some(n) if !n.is_empty() => format!("      name: {}\n    ", n),
-            _ => String::new(),
+        let port_name = match &p.name {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => format!("port-{}", p.container_port),
         };
         format!(
-"    - {}port: {port}
+"    - name: {name}
+      port: {port}
       targetPort: {port}
       protocol: TCP
 ",
-            name_line,
+            name = port_name,
             port = p.container_port,
         )
     }).collect();
@@ -2887,7 +2887,10 @@ fn generate_ingress_yaml(route: &IngressRoute) -> String {
         route.field_id, route.route_id
     );
     if let Some(anns) = &route.annotations {
-        for (k, v) in anns { ann.push_str(&format!("    {}: {}\n", k, v)); }
+        for (k, v) in anns {
+            // Always quote values — prevents YAML from parsing "true"/"false"/numbers as non-strings
+            ann.push_str(&format!("    {}: \"{}\"\n", k, v.replace('"', "\\\"")));
+        }
     }
 
     format!(

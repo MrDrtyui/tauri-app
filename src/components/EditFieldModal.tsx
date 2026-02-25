@@ -239,7 +239,12 @@ function PortsEditor({
         </div>
       ))}
       <button
-        onClick={() => onChange([...ports, { containerPort: 8080, name: "" }])}
+        onClick={() => {
+          const used = new Set(ports.map((p) => p.containerPort));
+          let next = 8080;
+          while (used.has(next)) next++;
+          onChange([...ports, { containerPort: next, name: "" }]);
+        }}
         style={{
           background: "none",
           border: "1px dashed var(--border-default)",

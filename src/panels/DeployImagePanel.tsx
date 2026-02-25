@@ -423,7 +423,7 @@ function ManifestPreview({
 // ─── DeployImagePanel ─────────────────────────────────────────────
 
 export function DeployImagePanel() {
-  const [namespace, setNamespace] = useState("default");
+  const [namespace, setNamespace] = useState("apps");
   const [name, setName] = useState("");
   const [image, setImage] = useState("");
   const [replicas, setReplicas] = useState(1);

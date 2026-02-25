@@ -783,7 +783,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
 
   // Image tab
   const [imgImage, setImgImage] = useState("");
-  const [imgNamespace, setImgNamespace] = useState(namespace);
+  const [imgNamespace, setImgNamespace] = useState("apps");
   const [imgReplicas, setImgReplicas] = useState(1);
   const [imgPorts, setImgPorts] = useState<
     Array<{ containerPort: number; name: string }>
@@ -854,7 +854,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     const fieldConfig: FieldConfig = {
       id: n,
       label: n,
-      namespace,
+      namespace: "apps",
       image: preset.image || `${n}:latest`,
       replicas: preset.replicas,
       port,
@@ -1928,10 +1928,13 @@ function ConfigureImage(props: ConfigureImageProps) {
         >
           <button
             onClick={() =>
-              setImgPorts((prev) => [
-                ...prev,
-                { containerPort: 8080, name: "" },
-              ])
+              setImgPorts((prev) => {
+                // pick a port that's not already used
+                const used = new Set(prev.map((p) => p.containerPort));
+                let next = 8080;
+                while (used.has(next)) next++;
+                return [...prev, { containerPort: next, name: "" }];
+              })
             }
             style={{
               background: "none",
