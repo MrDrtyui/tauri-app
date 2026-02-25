@@ -47,6 +47,7 @@ interface IDEStore {
   projectPath: string | null;
   nodes: YamlNode[];
   clusterStatus: ClusterStatus | null;
+  selectedLogPod: { name: string; namespace: string } | null;
 
   setProject: (result: ScanResult) => Promise<void>;
   closeProject: () => void;
@@ -79,6 +80,7 @@ interface IDEStore {
 
   // ── Selection ────────────────────────────────────────────────────────────────
   setSelectedEntity: (entity: SelectedEntity | null) => void;
+  setSelectedLogPod: (pod: { name: string; namespace: string } | null) => void;
 
   // ── Drag ─────────────────────────────────────────────────────────────────────
   startDrag: (tab: Tab, sourceGroupId: string) => void;
@@ -166,6 +168,7 @@ export const useIDEStore = create<IDEStore>()(
     projectPath: null,
     nodes: [],
     clusterStatus: null,
+    selectedLogPod: null,
 
     setProject: async (result: ScanResult) => {
       const layout = await loadEndfieldLayout(result.project_path);
@@ -453,6 +456,7 @@ export const useIDEStore = create<IDEStore>()(
 
     // ── Selection ─────────────────────────────────────────────────────────────
     setSelectedEntity: (entity) => set({ selectedEntity: entity }),
+    setSelectedLogPod: (pod) => set({ selectedLogPod: pod }),
 
     // ── Drag ──────────────────────────────────────────────────────────────────
     startDrag: (tab, sourceGroupId) => {

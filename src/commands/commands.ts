@@ -113,6 +113,53 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
     }
 
     case "field.logs": {
+      // Resolve which pod to show:
+      // - raw node: find exact cluster field by label, pick first pod
+      // - helm node: match workloads by release name, pick first pod across all workloads
+      const clusterStatus = store.clusterStatus;
+      const clusterFields = clusterStatus?.fields ?? [];
+
+      let targetPod: { name: string; namespace: string } | null = null;
+
+      if (node) {
+        if (node.source === "helm") {
+          const releaseName = (
+            node.helm?.release_name ?? node.label
+          ).toLowerCase();
+          const helmFields = clusterFields.filter((f) => {
+            const n = f.label.toLowerCase();
+            return (
+              n === releaseName ||
+              n.startsWith(releaseName + "-") ||
+              n.startsWith(releaseName + "_") ||
+              releaseName.startsWith(n + "-") ||
+              releaseName.startsWith(n + "_") ||
+              n.includes(releaseName) ||
+              releaseName.includes(n)
+            );
+          });
+          // Pick first running pod from any workload
+          for (const f of helmFields) {
+            const running =
+              f.pods.find((p) => p.phase === "Running") ?? f.pods[0];
+            if (running) {
+              targetPod = { name: running.name, namespace: running.namespace };
+              break;
+            }
+          }
+        } else {
+          const field = clusterFields.find((f) => f.label === node.label);
+          if (field) {
+            const running =
+              field.pods.find((p) => p.phase === "Running") ?? field.pods[0];
+            if (running)
+              targetPod = { name: running.name, namespace: running.namespace };
+          }
+        }
+      }
+
+      if (targetPod) store.setSelectedLogPod(targetPod);
+
       store.openTab(
         {
           id: "tab-logs",
