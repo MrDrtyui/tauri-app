@@ -151,48 +151,73 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
       const filePath = node.file_path;
       const namespace = node.namespace ?? "default";
 
-      // 1. Remove from cluster (kubectl delete -f / helm uninstall)
-      if (filePath) {
-        // For helm nodes the resourceDir is the parent of /helm/
-        // For raw nodes it's the directory containing the yaml file
-        const resourceDir = filePath.includes("/helm/")
-          ? filePath.substring(0, filePath.lastIndexOf("/helm/") + 1)
-          : filePath.substring(0, filePath.lastIndexOf("/") + 1);
-
-        removeResource(
-          node.id,
-          node.source,
-          resourceDir,
-          namespace,
-          node.helm?.release_name,
-        ).catch((err) => console.error("[delete] removeResource failed:", err));
-      }
-
-      // 2. Delete files from disk
-      if (filePath) {
-        // For helm: delete the whole component dir (parent of /helm/)
-        // For raw: delete just the yaml file
-        const filesToDelete = filePath.includes("/helm/")
-          ? [filePath.substring(0, filePath.lastIndexOf("/helm/") + 1)]
-          : [filePath];
-
-        deleteFieldFiles(filesToDelete, namespace).catch((err) =>
-          console.error("[delete] deleteFieldFiles failed:", err),
-        );
-      }
-
-      // 3. Close open tabs for this node
+      // 1. Close open tabs and deselect immediately
       if (filePath) store.closeTab(`file-${filePath}`);
       store.closeTab(`file-placeholder-${node.id}`);
-
-      // 4. Deselect if this node was selected
       const sel = store.selectedEntity;
       if (sel && (sel.id === node.id || sel.filePath === node.file_path)) {
         store.setSelectedEntity(null);
       }
 
-      // 5. Remove from IDE store
+      // 2. Remove from IDE store (optimistic UI)
       store.removeNode(node.id);
+
+      if (!filePath) break;
+
+      // For helm: file_path = "/project/infra/nginx/helm/Chart.yaml"
+      //   → componentDir = "/project/infra/nginx"  (delete entire component dir)
+      // For raw: file_path = "/project/apps/mongodbasdfaaaaa/deployment.yaml"
+      //   → parentDir = "/project/apps/mongodbasdfaaaaa" (delete entire service dir)
+      //   A service folder may contain deployment.yaml, service.yaml, configmap.yaml etc.
+      const isHelm = node.source === "helm";
+      const parentDir = filePath.substring(0, filePath.lastIndexOf("/"));
+      const componentDir = isHelm
+        ? filePath.substring(0, filePath.lastIndexOf("/helm/"))
+        : parentDir;
+      const resourceDir = componentDir;
+      const filesToDelete = [componentDir];
+
+      console.log("[delete] node:", node.id, "source:", node.source);
+      console.log("[delete] filesToDelete:", filesToDelete);
+      console.log("[delete] resourceDir:", resourceDir);
+
+      // 3. Delete files from disk
+      deleteFieldFiles(filesToDelete, namespace)
+        .then((result) => {
+          console.log(
+            "[delete] deleteFieldFiles result:",
+            JSON.stringify(result),
+          );
+          if (result.file_errors?.length) {
+            console.error("[delete] file errors:", result.file_errors);
+          }
+          if (result.missing_files?.length) {
+            console.warn("[delete] missing files:", result.missing_files);
+          }
+        })
+        .catch((err) =>
+          console.error("[delete] deleteFieldFiles FAILED:", err),
+        );
+
+      // 4. Remove from cluster
+      removeResource(
+        node.id,
+        node.source,
+        resourceDir,
+        namespace,
+        node.helm?.release_name ?? null,
+      )
+        .then((result) => {
+          console.log(
+            "[delete] removeResource result:",
+            JSON.stringify(result),
+          );
+          if (!result.success) {
+            console.warn("[delete] cluster removal errors:", result.stderr);
+          }
+        })
+        .catch((err) => console.error("[delete] removeResource FAILED:", err));
+
       break;
     }
   }

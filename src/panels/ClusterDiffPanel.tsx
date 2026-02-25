@@ -5,8 +5,6 @@ import { useIDEStore } from "../store/ideStore";
 const AUTO_REFRESH_MS = 8000; // 8s for diff
 const LOGS_REFRESH_MS = 3000; // 3s for logs
 
-// ─── Cluster Diff ─────────────────────────────────────────────────
-
 interface DiffRow {
   label: string;
   namespace: string;
@@ -64,7 +62,6 @@ export function ClusterDiffPanel() {
     setLastUpdated(new Date());
   }, [refreshClusterStatus]);
 
-  // Initial load + auto-refresh every 8s
   useEffect(() => {
     doRefresh();
     const id = setInterval(doRefresh, AUTO_REFRESH_MS);
@@ -233,7 +230,6 @@ export function ClusterDiffPanel() {
         </button>
       </div>
 
-      {/* Table header */}
       <div
         style={{
           display: "grid",
@@ -254,7 +250,6 @@ export function ClusterDiffPanel() {
         ))}
       </div>
 
-      {/* Rows */}
       <div style={{ flex: 1, overflowY: "auto" }}>
         {filtered.length === 0 && (
           <div
@@ -361,8 +356,6 @@ export function ClusterDiffPanel() {
   );
 }
 
-// ─── Cluster Logs ─────────────────────────────────────────────────
-
 interface LogLine {
   time: string;
   pod: string;
@@ -434,7 +427,6 @@ export function ClusterLogsPanel() {
     [],
   );
 
-  // Auto-refresh logs for selected pod every 3s
   useEffect(() => {
     if (!selectedPod) return;
     const pod = allPods.find((p) => p.name === selectedPod);
@@ -447,7 +439,6 @@ export function ClusterLogsPanel() {
     return () => clearInterval(id);
   }, [selectedPod, allPods, fetchLogs]);
 
-  // Auto-scroll to bottom
   useEffect(() => {
     if (autoScroll) logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, autoScroll]);
@@ -563,7 +554,6 @@ export function ClusterLogsPanel() {
           />
         </div>
 
-        {/* Level filters */}
         <div style={{ display: "flex", gap: 3 }}>
           {levelBtns.map((lv) => (
             <button

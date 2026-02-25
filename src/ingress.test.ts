@@ -14,8 +14,6 @@ import {
 } from "./panels/ingressStore.ts";
 import type { IngressRoute, DiscoveredRoute } from "./panels/ingressStore.ts";
 
-// ─── Test harness ─────────────────────────────────────────────────────────────
-
 let passed = 0;
 let failed = 0;
 
@@ -77,8 +75,6 @@ const DISCOVERED: DiscoveredRoute = {
   address: "192.168.1.100",
 };
 
-// ─── Route → Ingress name ─────────────────────────────────────────────────────
-
 console.log("\nRoute → Ingress name:");
 
 test("routeToIngressName produces ef-route-<8chars>", () => {
@@ -91,8 +87,6 @@ test("routeToIngressName is deterministic", () => {
   const b = routeToIngressName("same-id");
   assert(a === b, "Should be deterministic");
 });
-
-// ─── Edge label ───────────────────────────────────────────────────────────────
 
 console.log("\nEdge label:");
 
@@ -128,8 +122,6 @@ test("edge label defaults to :80 when no port info", () => {
   const label = routeEdgeLabel(route);
   assertIncludes(label, ":80");
 });
-
-// ─── Route → Ingress YAML generation (via string template) ────────────────────
 
 console.log("\nIngress YAML generation (string-based):");
 
@@ -211,8 +203,6 @@ test("YAML with TLS block", () => {
   assertIncludes(yaml, "- api.example.com");
 });
 
-// ─── Route edit patch ─────────────────────────────────────────────────────────
-
 console.log("\nRoute edit patch:");
 
 test("editing a route updates path and host but keeps routeId", () => {
@@ -232,8 +222,6 @@ test("editing a route updates path and host but keeps routeId", () => {
   assertIncludes(yaml, "host: v2.example.com");
   assertIncludes(yaml, "path: /v2");
 });
-
-// ─── Discovery → graph reconstruction ────────────────────────────────────────
 
 console.log("\nDiscovery → graph reconstruction:");
 
@@ -274,8 +262,6 @@ test("edge label from discovered route shows address info", () => {
   assertIncludes(label, "/api");
   assertIncludes(label, ":3000");
 });
-
-// ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);

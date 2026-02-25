@@ -155,6 +155,14 @@ export interface DeployResult {
 }
 
 /** mirrors Rust DiffResult */
+export interface DeleteResult {
+  deleted_files: string[];
+  missing_files: string[];
+  file_errors: string[];
+  kubectl_output: string | null;
+  kubectl_error: string | null;
+}
+
 export interface DiffResult {
   resource_id: string;
   diff: string;
@@ -600,8 +608,11 @@ export async function kubectlApplyAsync(path: string): Promise<void> {
 export async function deleteFieldFiles(
   filePaths: string[],
   namespace: string,
-): Promise<void> {
-  return safeInvoke("delete_field_files", { filePaths, namespace });
+): Promise<DeleteResult> {
+  return safeInvoke<DeleteResult>("delete_field_files", {
+    filePaths,
+    namespace,
+  });
 }
 
 export async function helmTemplate(

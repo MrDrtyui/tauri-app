@@ -33,6 +33,9 @@ export default function App() {
   const projectPath = useIDEStore((s) => s.projectPath);
   const refreshClusterStatus = useIDEStore((s) => s.refreshClusterStatus);
   const updateNodeFromFile = useIDEStore((s) => s.updateNodeFromFile);
+  const nodes = useIDEStore((s) => s.nodes);
+  const removeNode = useIDEStore((s) => s.removeNode);
+  const closeTab = useIDEStore((s) => s.closeTab);
 
   // Keep a ref to the unlisten fn so we can clean it up
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -66,7 +69,14 @@ export default function App() {
           const { path, kind } = event.payload;
 
           if (kind === "remove") {
-            // Nothing to parse — node will be gone on next full scan
+            // Find any node whose file_path matches and remove it from the store
+            const store = useIDEStore.getState();
+            const removed = store.nodes.find((n) => n.file_path === path);
+            if (removed) {
+              store.closeTab(`file-${path}`);
+              store.closeTab(`file-placeholder-${removed.id}`);
+              store.removeNode(removed.id);
+            }
             return;
           }
 
