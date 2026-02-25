@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useIDEStore } from "../store/ideStore";
+import { listen } from "@tauri-apps/api/event";
 import {
   YamlNode,
   saveYamlFile,
@@ -1215,12 +1216,40 @@ export function ExplorerPanel() {
   const [projectFiles, setProjectFiles] = useState<string[]>([]);
 
   // Load all project files for the file tree
-  useEffect(() => {
+  const rescan = useCallback(() => {
     if (!projectPath) return;
     scanProjectFiles(projectPath)
       .then(setProjectFiles)
       .catch(() => setProjectFiles([]));
-  }, [projectPath, nodes]); // re-scan when nodes change (new files added)
+  }, [projectPath]);
+
+  useEffect(() => {
+    rescan();
+  }, [rescan, nodes]); // re-scan when nodes change (new files added)
+
+  // Re-scan whenever the file watcher reports any change (create/modify/remove)
+  // Debounced to avoid hammering when many files change at once (e.g. on delete)
+  useEffect(() => {
+    if (!projectPath) return;
+    let unlisten: (() => void) | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    listen("yaml-file-changed", () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        rescan();
+      }, 300);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      unlisten?.();
+      if (timer) clearTimeout(timer);
+    };
+  }, [projectPath, rescan]);
 
   const fileTree = projectPath
     ? buildTreeFromPaths(projectFiles, projectPath)

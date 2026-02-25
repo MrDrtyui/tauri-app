@@ -1587,7 +1587,7 @@ fn remove_resource_inner(
         let cmd = format!("kubectl delete -f {} --recursive --ignore-not-found=true", dir_str);
         commands_run.push(cmd);
         let (stdout, stderr, success) = run_kubectl_output(&[
-            "delete", "-f", &dir_str, "--recursive", "--ignore-not-found=true",
+            "delete", "-f", &dir_str, "--recursive", "--ignore-not-found=true", "--wait=false",
         ]);
         DeployResult { resource_id, namespace, source, stdout, stderr, success, commands_run }
     }
@@ -1743,10 +1743,7 @@ fn scan_all_yaml_paths(dir: &Path, result: &mut Vec<String>) {
         if path.is_dir() {
             scan_all_yaml_paths(&path, result);
         } else if path.is_file() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext == "yaml" || ext == "yml" {
-                result.push(path.to_string_lossy().to_string());
-            }
+            result.push(path.to_string_lossy().to_string());
         }
     }
 }
@@ -1856,7 +1853,19 @@ fn save_yaml_file(file_path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_field_files(file_paths: Vec<String>, namespace: String) -> DeleteResult {
+async fn delete_field_files(file_paths: Vec<String>, namespace: String) -> DeleteResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_field_files_inner(file_paths, namespace)
+    }).await.unwrap_or_else(|e| DeleteResult {
+        deleted_files: vec![],
+        missing_files: vec![],
+        file_errors: vec![format!("spawn error: {}", e)],
+        kubectl_output: None,
+        kubectl_error: None,
+    })
+}
+
+fn delete_field_files_inner(file_paths: Vec<String>, namespace: String) -> DeleteResult {
     let mut result = DeleteResult {
         deleted_files: vec![],
         missing_files: vec![],
@@ -1878,9 +1887,9 @@ fn delete_field_files(file_paths: Vec<String>, namespace: String) -> DeleteResul
         // Step 1: kubectl delete from cluster
         // Directories (helm component dirs or raw dirs) need --recursive
         let kubectl_args: Vec<&str> = if p.is_dir() {
-            vec!["delete", "-f", file_path, "--recursive", "--ignore-not-found=true"]
+            vec!["delete", "-f", file_path, "--recursive", "--ignore-not-found=true", "--wait=false"]
         } else {
-            vec!["delete", "-f", file_path, "--ignore-not-found=true"]
+            vec!["delete", "-f", file_path, "--ignore-not-found=true", "--wait=false"]
         };
 
         match run_kubectl(&kubectl_args) {
@@ -2725,7 +2734,7 @@ fn deploy_image_inner(req: DeployImageRequest) -> DeployImageResult {
 fn kubectl_apply_manifest(yaml: &str, _namespace: &str) -> Result<String, String> {
     use std::io::Write;
     let mut child = Command::new("kubectl")
-        .args(["apply", "--server-side", "--field-manager=endfield", "-f", "-"])
+        .args(["apply", "--server-side", "--field-manager=endfield", "--force-conflicts", "-f", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -3060,13 +3069,9 @@ fn watch_project(
             Err(_) => return,
         };
 
-        // Only care about yaml/yml files
+        // Emit all file changes (Explorer shows all files, not just yaml)
         for path in &event.paths {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext != "yaml" && ext != "yml" {
-                continue;
-            }
-            // Skip rendered/ and charts/ — those are generated, not user-edited
+            // Skip hidden dirs, node_modules, vendor, charts, rendered
             let skip = path.components().any(|c| {
                 let s = c.as_os_str().to_str().unwrap_or("");
                 s == "rendered" || s == "charts" || s == ".git"
