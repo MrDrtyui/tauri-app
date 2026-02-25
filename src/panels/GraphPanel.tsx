@@ -647,11 +647,28 @@ export function GraphPanel() {
         {routes.map((route) => {
           // Find source node (ingress controller) and target node (service)
           const srcNode = storeNodes.find((n) => n.id === route.field_id);
-          const tgtNode = storeNodes.find(
+
+          // Try direct label match first, then fall back to a helm node whose
+          // release name matches (helm names its services as <release> or <release>-<chart>)
+          let tgtNode = storeNodes.find(
             (n) =>
               n.label === route.target_service &&
               n.namespace === route.target_namespace,
           );
+          if (!tgtNode) {
+            tgtNode = storeNodes.find(
+              (n) =>
+                n.source === "helm" &&
+                n.helm != null &&
+                (n.namespace === route.target_namespace ||
+                  n.helm.namespace === route.target_namespace) &&
+                (route.target_service === n.helm.release_name ||
+                  route.target_service.startsWith(n.helm.release_name + "-") ||
+                  route.target_service.startsWith(n.helm.release_name + "_") ||
+                  n.helm.release_name.startsWith(route.target_service)),
+            );
+          }
+
           if (!srcNode || !tgtNode) return null;
 
           const srcPos = localPos[srcNode.id] ?? { x: srcNode.x, y: srcNode.y };
@@ -956,11 +973,28 @@ export function GraphPanel() {
             }
           }}
           onJumpToService={(route) => {
-            const tgtNode = storeNodes.find(
+            let tgtNode = storeNodes.find(
               (n) =>
                 n.label === route.target_service &&
                 n.namespace === route.target_namespace,
             );
+            if (!tgtNode) {
+              tgtNode = storeNodes.find(
+                (n) =>
+                  n.source === "helm" &&
+                  n.helm != null &&
+                  (n.namespace === route.target_namespace ||
+                    n.helm.namespace === route.target_namespace) &&
+                  (route.target_service === n.helm.release_name ||
+                    route.target_service.startsWith(
+                      n.helm.release_name + "-",
+                    ) ||
+                    route.target_service.startsWith(
+                      n.helm.release_name + "_",
+                    ) ||
+                    n.helm.release_name.startsWith(route.target_service)),
+              );
+            }
             if (tgtNode) {
               setSelectedId(tgtNode.id);
               executeCommand("field.properties", { node: tgtNode });

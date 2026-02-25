@@ -183,6 +183,87 @@ function SyncDot({
   );
 }
 
+// ─── PodRow ───────────────────────────────────────────────────────
+
+function PodRow({
+  pod,
+  index,
+}: {
+  pod: {
+    name: string;
+    namespace: string;
+    phase: string;
+    ready: number;
+    total: number;
+    restarts: number;
+  };
+  index: number;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "5px 8px",
+        borderTop: index === 0 ? "none" : "1px solid var(--border-subtle)",
+        background: "var(--bg-surface)",
+      }}
+    >
+      <span
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          flexShrink: 0,
+          background:
+            pod.phase === "Running"
+              ? "var(--status-ok)"
+              : pod.phase === "Pending"
+                ? "var(--status-warn)"
+                : "var(--status-error)",
+        }}
+      />
+      <span
+        style={{
+          flex: 1,
+          fontSize: "var(--font-size-xs)",
+          fontFamily: "var(--font-mono)",
+          color: "var(--text-faint)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {pod.name}
+      </span>
+      <span
+        style={{
+          fontSize: "var(--font-size-xs)",
+          fontFamily: "var(--font-mono)",
+          color: "var(--text-subtle)",
+          flexShrink: 0,
+        }}
+      >
+        {pod.ready}/{pod.total}
+      </span>
+      {pod.restarts > 0 && (
+        <span
+          style={{
+            fontSize: "var(--font-size-xs)",
+            fontFamily: "var(--font-mono)",
+            color: "var(--ctp-yellow)",
+            flexShrink: 0,
+          }}
+          title="Restart count"
+        >
+          ↺{pod.restarts}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ─── InspectorPanel ───────────────────────────────────────────────
 
 export function InspectorPanel() {
@@ -449,74 +530,90 @@ export function InspectorPanel() {
                 }}
               >
                 {clusterInfo.pods.map((pod, i) => (
-                  <div
-                    key={pod.name}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "5px 8px",
-                      borderTop:
-                        i === 0 ? "none" : "1px solid var(--border-subtle)",
-                      background: "var(--bg-surface)",
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        flexShrink: 0,
-                        background:
-                          pod.phase === "Running"
-                            ? "var(--status-ok)"
-                            : pod.phase === "Pending"
-                              ? "var(--status-warn)"
-                              : "var(--status-error)",
-                      }}
-                    />
-                    <span
-                      style={{
-                        flex: 1,
-                        fontSize: "var(--font-size-xs)",
-                        fontFamily: "var(--font-mono)",
-                        color: "var(--text-faint)",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {pod.name}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: "var(--font-size-xs)",
-                        fontFamily: "var(--font-mono)",
-                        color: "var(--text-subtle)",
-                        flexShrink: 0,
-                      }}
-                    >
-                      {pod.ready}/{pod.total}
-                    </span>
-                    {pod.restarts > 0 && (
-                      <span
-                        style={{
-                          fontSize: "var(--font-size-xs)",
-                          fontFamily: "var(--font-mono)",
-                          color: "var(--ctp-yellow)",
-                          flexShrink: 0,
-                        }}
-                        title="Restart count"
-                      >
-                        ↺{pod.restarts}
-                      </span>
-                    )}
-                  </div>
+                  <PodRow key={pod.name} pod={pod} index={i} />
                 ))}
               </div>
             )}
           </Section>
         )}
+
+        {/* Helm pods — all deployments/pods that belong to this helm release */}
+        {node?.source === "helm" &&
+          node.helm &&
+          (() => {
+            const releaseName = node.helm.release_name;
+            const releaseNs = node.helm.namespace || node.namespace;
+            // Collect all FieldStatus entries whose label starts with the release name
+            // (helm typically names resources as "<release>-<chart>" or just "<release>")
+            const helmFields =
+              clusterStatus?.fields.filter((f) => {
+                const nsMatch = !releaseNs || f.namespace === releaseNs;
+                return (
+                  nsMatch &&
+                  (f.label === releaseName ||
+                    f.label.startsWith(releaseName + "-") ||
+                    f.label.startsWith(releaseName + "_"))
+                );
+              }) ?? [];
+
+            // Collect all pods from those fields (dedup by pod name)
+            const seenPods = new Set<string>();
+            const allPods = helmFields
+              .flatMap((f) => f.pods)
+              .filter((p) => {
+                if (seenPods.has(p.name)) return false;
+                seenPods.add(p.name);
+                return true;
+              });
+
+            if (allPods.length === 0 && helmFields.length === 0) return null;
+
+            const totalReady = helmFields.reduce((s, f) => s + f.ready, 0);
+            const totalDesired = helmFields.reduce((s, f) => s + f.desired, 0);
+            const overallStatus =
+              totalDesired === 0
+                ? "gray"
+                : totalReady === totalDesired
+                  ? "green"
+                  : totalReady === 0
+                    ? "red"
+                    : "yellow";
+
+            return (
+              <Section title="Helm Release">
+                <PropRow label="Release" value={releaseName} mono />
+                <PropRow
+                  label="Status"
+                  value={<StatusBadge status={overallStatus} />}
+                />
+                <PropRow
+                  label="Ready"
+                  value={`${totalReady} / ${totalDesired}`}
+                />
+                {helmFields.length > 1 && (
+                  <PropRow
+                    label="Workloads"
+                    value={helmFields.map((f) => f.label).join(", ")}
+                    mono
+                  />
+                )}
+                {allPods.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: 6,
+                      border: "1px solid var(--border-subtle)",
+                      borderRadius: "var(--radius-sm)",
+                      overflow: "hidden",
+                    }}
+                  >
+                    {allPods.map((pod, i) => (
+                      <PodRow key={pod.name} pod={pod} index={i} />
+                    ))}
+                  </div>
+                )}
+              </Section>
+            );
+          })()}
 
         {/* File-only info */}
         {type === "file" && !node && (
