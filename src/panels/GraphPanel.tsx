@@ -1,4 +1,5 @@
 import React, { useCallback, useRef, useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useIDEStore } from "../store/ideStore";
 import { YamlNode, saveYamlFile, deleteFieldFiles } from "../store/tauriStore";
 import { ContextMenu, ContextMenuState } from "../components/ContextMenu";
@@ -15,11 +16,22 @@ import {
   routeEdgeLabel,
   discoveredToRoute,
 } from "./ingressStore";
+import { loadRoutesFromFiles } from "./ingressRouteLoader";
 import { IngressRouteModal } from "./IngressRouteModal";
 import {
   IngressEdgeContextMenu,
   EdgeContextMenuState,
 } from "./IngressEdgeContextMenu";
+
+import {
+  PostgresConfig,
+  DeploymentEnvSpec,
+  PostgresConnection,
+  inferPostgresConnections,
+  postgresServiceName,
+  postgresServiceDns,
+} from "../store/postgresStore";
+import { PostgresConnectionModal } from "./PostgresConnectionModal";
 
 // ─── Node type system — Catppuccin Mocha × macOS Tahoe ───────────
 //
@@ -145,6 +157,7 @@ function GraphNode({
   onRenameChange,
   onRenameCommit,
   renameRef,
+  dbConnected,
 }: {
   node: YamlNode;
   selected: boolean;
@@ -157,6 +170,7 @@ function GraphNode({
   onRenameChange: (v: string) => void;
   onRenameCommit: () => void;
   renameRef: React.RefObject<HTMLInputElement>;
+  dbConnected?: boolean;
 }) {
   const [hov, setHov] = useState(false);
   const t = getType(node.type_id);
@@ -232,7 +246,26 @@ function GraphNode({
             }}
           />
         </span>
-        {status && <StatusDot status={status.status} />}
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {/* DB connected badge */}
+          {dbConnected && (
+            <span
+              style={{
+                fontSize: 8,
+                color: "#74c7ec",
+                padding: "1px 4px",
+                borderRadius: "var(--radius-xs)",
+                background: "rgba(116,199,236,0.12)",
+                border: "1px solid rgba(116,199,236,0.25)",
+                fontFamily: "var(--font-mono)",
+                letterSpacing: "0.02em",
+              }}
+            >
+              DB
+            </span>
+          )}
+          {status && <StatusDot status={status.status} />}
+        </div>
       </div>
 
       {/* Name */}
@@ -358,6 +391,7 @@ export function GraphPanel() {
   const updateNodePosition = useIDEStore((s) => s.updateNodePosition);
   const setSelectedEntity = useIDEStore((s) => s.setSelectedEntity);
   const renameNode = useIDEStore((s) => s.renameNode);
+  const addNode = useIDEStore((s) => s.addNode);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -386,12 +420,156 @@ export function GraphPanel() {
   const [deleteRouteTarget, setDeleteRouteTarget] =
     useState<IngressRoute | null>(null);
 
-  // Discover managed ingress routes on mount
+  // ── PostgreSQL state ──────────────────────────────────────────
+  const [postgresFields, setPostgresFields] = useState<PostgresConfig[]>([]);
+  const [dbConnections, setDbConnections] = useState<
+    Map<string, { fieldId: string; conn: PostgresConnection }>
+  >(new Map());
+  const [dbConnectModal, setDbConnectModal] = useState<{
+    postgresNodeId: string;
+  } | null>(null);
+  const [dbEdgeCtxMenu, setDbEdgeCtxMenu] =
+    useState<DbEdgeContextMenuState | null>(null);
+
+  // Load ingress routes from disk files — source of truth, no cluster needed.
+  // Falls back to kubectl discover only when no project is open or files are empty.
   useEffect(() => {
-    discoverIngressRoutes()
-      .then((discovered) => setRoutes(discovered.map(discoveredToRoute)))
+    if (!projectPath) {
+      discoverIngressRoutes()
+        .then((discovered) => setRoutes(discovered.map(discoveredToRoute)))
+        .catch(() => {});
+      return;
+    }
+    loadRoutesFromFiles(projectPath)
+      .then((fileRoutes) => {
+        if (fileRoutes.length > 0) {
+          setRoutes(fileRoutes);
+        } else {
+          // No route files yet — try kubectl as fallback
+          return discoverIngressRoutes()
+            .then((discovered) => setRoutes(discovered.map(discoveredToRoute)))
+            .catch(() => {});
+        }
+      })
       .catch(() => {});
-  }, []);
+  }, [projectPath]);
+
+  // Re-run Postgres connection inference whenever nodes change
+  // Reads each service's actual YAML file to detect DATABASE_URL/PGHOST/secretRef
+  useEffect(() => {
+    const pgFields: PostgresConfig[] = storeNodes
+      .filter((n) => n.type_id === "database" && n.label)
+      .map((n) => ({
+        fieldId: n.id,
+        name: n.label,
+        namespace: n.namespace,
+        postgresVersion: "16-alpine",
+        databaseName: "appdb",
+        username: "postgres",
+        password: "",
+        port: 5432,
+        storageSize: "10Gi",
+        storageClass: "",
+        deployMode: "raw" as const,
+        chartVersion: "",
+        enableMetrics: false,
+      }));
+
+    setPostgresFields(pgFields);
+
+    if (pgFields.length === 0) {
+      setDbConnections(new Map());
+      return;
+    }
+
+    const serviceNodesList = storeNodes.filter(
+      (n) =>
+        n.type_id === "service" ||
+        n.type_id === "custom" ||
+        n.kind === "Deployment",
+    );
+
+    const newConnections = new Map<
+      string,
+      { fieldId: string; conn: PostgresConnection }
+    >();
+
+    // Read YAML files in parallel, infer connections from env var patterns
+    Promise.all(
+      serviceNodesList.map(async (svcNode) => {
+        const envVars: DeploymentEnvSpec["envVars"] = [];
+
+        if (svcNode.file_path) {
+          try {
+            const { readYamlFile: readYaml } =
+              await import("../store/tauriStore");
+            const yaml = await readYaml(svcNode.file_path);
+
+            const dbUrlMatch = yaml.match(
+              /DATABASE_URL[^:]*:\s*["']?([^\n"']+)/,
+            );
+            if (dbUrlMatch)
+              envVars.push({
+                key: "DATABASE_URL",
+                value: dbUrlMatch[1].trim(),
+              });
+
+            const pgHostMatch = yaml.match(/PGHOST[^:]*:\s*["']?([^\n"']+)/);
+            if (pgHostMatch)
+              envVars.push({ key: "PGHOST", value: pgHostMatch[1].trim() });
+
+            // secretKeyRef blocks
+            for (const m of yaml.matchAll(/name:\s+([^\s\n]+)-credentials/g)) {
+              envVars.push({
+                key: "_secretRef",
+                value: "",
+                secretRef: { secretName: m[1] + "-credentials" },
+              });
+            }
+            for (const m of yaml.matchAll(/name:\s+([^\s\n]+)-secret\b/g)) {
+              envVars.push({
+                key: "_secretRef",
+                value: "",
+                secretRef: { secretName: m[1] + "-secret" },
+              });
+            }
+          } catch {
+            /* file unreadable */
+          }
+        }
+
+        const spec: DeploymentEnvSpec = {
+          nodeId: svcNode.id,
+          nodeLabel: svcNode.label,
+          nodeNamespace: svcNode.namespace,
+          envVars,
+        };
+
+        const conns = inferPostgresConnections(spec, pgFields);
+        conns.forEach((c) => {
+          const pgField =
+            pgFields.find((f) => {
+              const svcName = postgresServiceName(f.name);
+              const dns = postgresServiceDns(f.name, f.namespace);
+              return (
+                c.envVars.some((v) => v.includes(svcName) || v.includes(dns)) ||
+                envVars.some((e) =>
+                  e.secretRef?.secretName?.startsWith(svcName),
+                )
+              );
+            }) ?? pgFields[0];
+          if (pgField) {
+            newConnections.set(svcNode.id, {
+              fieldId: pgField.fieldId,
+              conn: c,
+            });
+          }
+        });
+      }),
+    ).then(() => {
+      setDbConnections(new Map(newConnections));
+    });
+  }, [storeNodes]);
 
   const namespace = storeNodes[0]?.namespace ?? "default";
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -466,7 +644,6 @@ export function GraphPanel() {
       node.label.toLowerCase().includes("nginx"));
 
   const getIngressClassName = (node: YamlNode): string => {
-    // Derive class from helm chart name or fallback to "nginx"
     if (node.helm?.chart_name?.includes("ingress-nginx")) return "nginx";
     return "nginx";
   };
@@ -477,6 +654,12 @@ export function GraphPanel() {
       ingressClassName: getIngressClassName(node),
     });
   }, []);
+
+  // ── Is a service node (can connect to DB) ─────────────────────
+  const isServiceNode = (node: YamlNode) =>
+    node.type_id === "service" ||
+    node.type_id === "custom" ||
+    node.kind === "Deployment";
 
   // ── Canvas pan ───────────────────────────────────────────────
   const panState = useRef<{
@@ -645,11 +828,8 @@ export function GraphPanel() {
           </marker>
         </defs>
         {routes.map((route) => {
-          // Find source node (ingress controller) and target node (service)
           const srcNode = storeNodes.find((n) => n.id === route.field_id);
 
-          // Try direct label match first, then fall back to a helm node whose
-          // release name matches (helm names its services as <release> or <release>-<chart>)
           let tgtNode = storeNodes.find(
             (n) =>
               n.label === route.target_service &&
@@ -674,17 +854,14 @@ export function GraphPanel() {
           const srcPos = localPos[srcNode.id] ?? { x: srcNode.x, y: srcNode.y };
           const tgtPos = localPos[tgtNode.id] ?? { x: tgtNode.x, y: tgtNode.y };
 
-          // Node dimensions: 158 × ~88
           const nodeW = 158,
             nodeH = 88;
 
-          // Source: right center, Target: left center
           const x1 = pan.x + (srcPos.x + nodeW) * zoom;
           const y1 = pan.y + (srcPos.y + nodeH / 2) * zoom;
           const x2 = pan.x + tgtPos.x * zoom;
           const y2 = pan.y + (tgtPos.y + nodeH / 2) * zoom;
 
-          // Cubic bezier
           const cx1 = x1 + 60 * zoom;
           const cx2 = x2 - 60 * zoom;
 
@@ -701,14 +878,12 @@ export function GraphPanel() {
                 setEdgeCtxMenu({ route, x: e.clientX, y: e.clientY });
               }}
             >
-              {/* Wider invisible hit area */}
               <path
                 d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
                 fill="none"
                 stroke="transparent"
                 strokeWidth={14}
               />
-              {/* Visible edge */}
               <path
                 d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
                 fill="none"
@@ -718,7 +893,6 @@ export function GraphPanel() {
                 strokeDasharray="6,4"
                 markerEnd="url(#ingress-arrow)"
               />
-              {/* Edge label */}
               <text
                 x={midX}
                 y={midY}
@@ -734,6 +908,96 @@ export function GraphPanel() {
             </g>
           );
         })}
+      </svg>
+
+      {/* PostgreSQL DB connection edges — SVG layer */}
+      <svg
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          pointerEvents: "none",
+          overflow: "visible",
+          zIndex: 2,
+        }}
+      >
+        <defs>
+          <marker
+            id="db-arrow"
+            markerWidth="8"
+            markerHeight="8"
+            refX="6"
+            refY="3"
+            orient="auto"
+          >
+            <path d="M0,0 L0,6 L8,3 z" fill="#74c7ec" opacity={0.7} />
+          </marker>
+        </defs>
+        {Array.from(dbConnections.entries()).map(
+          ([svcNodeId, { fieldId, conn }]) => {
+            const svcNode = storeNodes.find((n) => n.id === svcNodeId);
+            const pgNode = storeNodes.find((n) => n.id === fieldId);
+            if (!svcNode || !pgNode) return null;
+
+            const svcPos = localPos[svcNode.id] ?? {
+              x: svcNode.x,
+              y: svcNode.y,
+            };
+            const pgPos = localPos[pgNode.id] ?? { x: pgNode.x, y: pgNode.y };
+
+            const nodeW = 158,
+              nodeH = 88;
+
+            // Service right edge → Postgres left edge
+            const x1 = pan.x + (svcPos.x + nodeW) * zoom;
+            const y1 = pan.y + (svcPos.y + nodeH / 2) * zoom;
+            const x2 = pan.x + pgPos.x * zoom;
+            const y2 = pan.y + (pgPos.y + nodeH / 2) * zoom;
+
+            const cx1 = x1 + 50 * zoom;
+            const cx2 = x2 - 50 * zoom;
+
+            return (
+              <g
+                key={`db-${svcNodeId}-${fieldId}`}
+                style={{ pointerEvents: "all", cursor: "default" }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  const svcNode = storeNodes.find((n) => n.id === svcNodeId);
+                  const pgNode = storeNodes.find((n) => n.id === fieldId);
+                  if (svcNode && pgNode) {
+                    setDbEdgeCtxMenu({
+                      svcNode,
+                      pgNode,
+                      conn,
+                      x: e.clientX,
+                      y: e.clientY,
+                    });
+                  }
+                }}
+              >
+                {/* Wide invisible hit area for hover */}
+                <path
+                  d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth={14}
+                />
+                {/* Visible edge — sapphire blue, tighter dash */}
+                <path
+                  d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
+                  fill="none"
+                  stroke="#74c7ec"
+                  strokeWidth={1.5}
+                  strokeOpacity={0.5}
+                  strokeDasharray="4,3"
+                  markerEnd="url(#db-arrow)"
+                />
+              </g>
+            );
+          },
+        )}
       </svg>
 
       {/* Nodes */}
@@ -771,6 +1035,13 @@ export function GraphPanel() {
                 onRenameChange={setRenameValue}
                 onRenameCommit={commitRename}
                 renameRef={renameRef}
+                dbConnected={
+                  node.type_id === "database"
+                    ? Array.from(dbConnections.values()).some(
+                        (c) => c.fieldId === node.id,
+                      )
+                    : dbConnections.has(node.id)
+                }
               />
             </div>
           );
@@ -833,10 +1104,31 @@ export function GraphPanel() {
             setDeleteTarget(node);
             setContextMenu(null);
           }}
+          extraItems={
+            contextMenu.node &&
+            isServiceNode(contextMenu.node) &&
+            postgresFields.length > 0
+              ? [
+                  {
+                    label: "Connect to PostgreSQL…",
+                    icon: "database",
+                    action: () => {
+                      const node = contextMenu.node!;
+                      setDbConnectModal({
+                        serviceNodeId: node.id,
+                        serviceLabel: node.label,
+                        serviceNamespace: node.namespace,
+                      });
+                      setContextMenu(null);
+                    },
+                  },
+                ]
+              : []
+          }
         />
       )}
 
-      {/* IngressNginx "Create Route" floating button — shown when node selected */}
+      {/* IngressNginx "Create Route" floating button */}
       {selectedId &&
         (() => {
           const node = storeNodes.find((n) => n.id === selectedId);
@@ -875,6 +1167,59 @@ export function GraphPanel() {
               >
                 <AppIcon name="add" size={10} strokeWidth={2.5} />
                 Create Route
+              </button>
+            </div>
+          );
+        })()}
+
+      {/* "Connect to Service" floating button — shown when postgres node is selected */}
+      {selectedId &&
+        (() => {
+          const node = storeNodes.find((n) => n.id === selectedId);
+          if (!node || node.type_id !== "database") return null;
+          const pos = getNodePos(node);
+          // Count how many services are already connected to this postgres node
+          const connectedCount = Array.from(dbConnections.values()).filter(
+            (c) => c.fieldId === node.id,
+          ).length;
+          return (
+            <div
+              style={{
+                position: "absolute",
+                left: pan.x + pos.x * zoom,
+                top: pan.y + (pos.y + 96) * zoom,
+                transform: `scale(${zoom})`,
+                transformOrigin: "top left",
+                zIndex: 20,
+                pointerEvents: "all",
+              }}
+            >
+              <button
+                onClick={() => setDbConnectModal({ postgresNodeId: node.id })}
+                style={{
+                  background:
+                    connectedCount > 0
+                      ? "rgba(116,199,236,0.18)"
+                      : "rgba(116,199,236,0.10)",
+                  border: `1px solid rgba(116,199,236,${connectedCount > 0 ? "0.50" : "0.30"})`,
+                  borderRadius: "var(--radius-sm)",
+                  color: "#74c7ec",
+                  cursor: "pointer",
+                  fontSize: "var(--font-size-xs)",
+                  fontFamily: "var(--font-ui)",
+                  fontWeight: 500,
+                  padding: "3px 10px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  whiteSpace: "nowrap",
+                  boxShadow: "var(--shadow-sm)",
+                }}
+              >
+                <AppIcon name="database" size={10} strokeWidth={2} />
+                {connectedCount > 0
+                  ? `${connectedCount} service${connectedCount > 1 ? "s" : ""} connected`
+                  : "Connect Service"}
               </button>
             </div>
           );
@@ -919,8 +1264,6 @@ export function GraphPanel() {
               }
               return [...prev, route];
             });
-            // Save YAML to disk so the route survives across project reloads
-            // and can be managed like any other manifest
             if (projectPath) {
               getIngressRouteYaml(route)
                 .then((yaml) => {
@@ -947,6 +1290,46 @@ export function GraphPanel() {
           onClose={() => setRouteModal(null)}
         />
       )}
+
+      {/* PostgreSQL Connection Modal */}
+      {dbConnectModal &&
+        (() => {
+          const pgNode = storeNodes.find(
+            (n) => n.id === dbConnectModal.postgresNodeId,
+          );
+          const pgConfig = postgresFields.find(
+            (f) => f.fieldId === dbConnectModal.postgresNodeId,
+          );
+          if (!pgNode || !pgConfig) return null;
+          const svcNodes = storeNodes.filter(
+            (n) =>
+              n.type_id === "service" ||
+              n.type_id === "custom" ||
+              n.kind === "Deployment",
+          );
+          return (
+            <PostgresConnectionModal
+              postgresNode={pgNode}
+              postgresConfig={pgConfig}
+              serviceNodes={svcNodes}
+              onClose={() => setDbConnectModal(null)}
+              onConnect={(serviceNodeId, postgresFieldId, envVarNames) => {
+                setDbConnections((prev) => {
+                  const next = new Map(prev);
+                  next.set(serviceNodeId, {
+                    fieldId: postgresFieldId,
+                    conn: {
+                      serviceNodeId,
+                      reason: "DATABASE_URL",
+                      envVars: envVarNames,
+                    },
+                  });
+                  return next;
+                });
+              }}
+            />
+          );
+        })()}
 
       {/* Edge right-click context menu */}
       {edgeCtxMenu && (
@@ -999,6 +1382,70 @@ export function GraphPanel() {
               setSelectedId(tgtNode.id);
               executeCommand("field.properties", { node: tgtNode });
             }
+          }}
+        />
+      )}
+
+      {/* DB edge right-click context menu */}
+      {dbEdgeCtxMenu && (
+        <DbEdgeContextMenu
+          state={dbEdgeCtxMenu}
+          onClose={() => setDbEdgeCtxMenu(null)}
+          onDisconnect={async (svcNodeId) => {
+            const svcNode = storeNodes.find((n) => n.id === svcNodeId);
+            if (svcNode?.file_path) {
+              try {
+                const { readYamlFile, saveYamlFile: saveYaml } =
+                  await import("../store/tauriStore");
+                const yaml = await readYamlFile(svcNode.file_path);
+                // Remove lines containing DB env keys
+                const dbEnvKeys = [
+                  "DATABASE_URL",
+                  "PGHOST",
+                  "PGPORT",
+                  "PGUSER",
+                  "PGPASSWORD",
+                  "PGDATABASE",
+                ];
+                const pattern = new RegExp(
+                  `^[\\s\\S]*?(${dbEnvKeys.join("|")})[\\s\\S]*?\\n`,
+                  "gm",
+                );
+                // Line-by-line removal of env var entries
+                const lines = yaml.split("\n");
+                let skipNext = false;
+                const filtered = lines.filter((line) => {
+                  if (skipNext && /^\s+-\s+/.test(line)) {
+                    skipNext = false;
+                    return false;
+                  }
+                  skipNext = false;
+                  const isDbKey = dbEnvKeys.some((k) =>
+                    new RegExp(`\\b${k}\\b`).test(line),
+                  );
+                  if (isDbKey) {
+                    return false;
+                  }
+                  return true;
+                });
+                await saveYaml(svcNode.file_path, filtered.join("\n"));
+              } catch {
+                /* ignore file errors */
+              }
+            }
+            setDbConnections((prev) => {
+              const next = new Map(prev);
+              next.delete(svcNodeId);
+              return next;
+            });
+          }}
+          onJumpToService={(node) => {
+            setSelectedId(node.id);
+            executeCommand("field.properties", { node });
+          }}
+          onJumpToDatabase={(node) => {
+            setSelectedId(node.id);
+            executeCommand("field.properties", { node });
           }}
         />
       )}
@@ -1079,7 +1526,6 @@ export function GraphPanel() {
                       deleteRouteTarget.ingress_name,
                       deleteRouteTarget.ingress_namespace,
                     );
-                    // Also delete the saved YAML file from disk
                     if (projectPath) {
                       const ingressNode = storeNodes.find(
                         (n) => n.id === deleteRouteTarget!.field_id,
@@ -1271,6 +1717,229 @@ function ZoomDisplay({ zoom }: { zoom: number }) {
       }}
     >
       {Math.round(zoom * 100)}%
+    </div>
+  );
+}
+
+// ─── DB Edge Context Menu ──────────────────────────────────────────
+
+interface DbEdgeContextMenuState {
+  svcNode: YamlNode;
+  pgNode: YamlNode;
+  conn: PostgresConnection;
+  x: number;
+  y: number;
+}
+
+function DbEdgeContextMenu({
+  state,
+  onClose,
+  onDisconnect,
+  onJumpToService,
+  onJumpToDatabase,
+}: {
+  state: DbEdgeContextMenuState;
+  onClose: () => void;
+  onDisconnect: (svcNodeId: string) => void;
+  onJumpToService: (node: YamlNode) => void;
+  onJumpToDatabase: (node: YamlNode) => void;
+}) {
+  const { svcNode, pgNode, conn, x, y } = state;
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler);
+    };
+  }, [onClose]);
+
+  const menuW = 230;
+  const menuH = 200;
+  const left = Math.min(x, window.innerWidth - menuW - 8);
+  const top = Math.min(y, window.innerHeight - menuH - 8);
+
+  const envLabel = conn.envVars
+    .filter((v) => !v.startsWith("("))
+    .slice(0, 3)
+    .join(", ");
+
+  const items = [
+    {
+      id: "jumpSvc",
+      label: `Jump to ${svcNode.label}`,
+      icon: "service" as const,
+      action: () => {
+        onJumpToService(svcNode);
+        onClose();
+      },
+    },
+    {
+      id: "jumpDb",
+      label: `Jump to ${pgNode.label}`,
+      icon: "database" as const,
+      action: () => {
+        onJumpToDatabase(pgNode);
+        onClose();
+      },
+    },
+    {
+      id: "disconnect",
+      label: "Remove DB connection",
+      icon: "delete" as const,
+      danger: true,
+      dividerBefore: true,
+      action: () => {
+        onDisconnect(svcNode.id);
+        onClose();
+      },
+    },
+  ];
+
+  return createPortal(
+    <div
+      ref={ref}
+      style={{
+        position: "fixed",
+        top,
+        left,
+        background: "var(--bg-modal)",
+        backdropFilter: "var(--blur-md)",
+        WebkitBackdropFilter: "var(--blur-md)",
+        border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-lg)",
+        padding: "4px 0",
+        minWidth: menuW,
+        boxShadow: "var(--shadow-lg)",
+        zIndex: 9999,
+        animation: "ef-slidein 0.12s ease-out",
+        fontFamily: "var(--font-ui)",
+      }}
+    >
+      <div
+        style={{
+          padding: "8px 12px 6px",
+          borderBottom: "1px solid var(--border-subtle)",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 2,
+        }}
+      >
+        <span
+          style={{ color: "#74c7ec", display: "flex", alignItems: "center" }}
+        >
+          <AppIcon name="database" size={14} strokeWidth={1.75} />
+        </span>
+        <div>
+          <div
+            style={{
+              color: "var(--text-primary)",
+              fontSize: "var(--font-size-sm)",
+              fontWeight: 500,
+            }}
+          >
+            DB Connection
+          </div>
+          <div
+            style={{
+              color: "var(--text-faint)",
+              fontSize: 10,
+              fontFamily: "var(--font-mono)",
+              maxWidth: 190,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {svcNode.label} → {pgNode.label}
+            {envLabel ? ` · ${envLabel}` : ""}
+          </div>
+        </div>
+      </div>
+
+      {items.map((item) => (
+        <React.Fragment key={item.id}>
+          {item.dividerBefore && (
+            <div
+              style={{
+                height: 1,
+                background: "var(--border-subtle)",
+                margin: "3px 0",
+              }}
+            />
+          )}
+          <DbEdgeMenuItem
+            label={item.label}
+            icon={item.icon}
+            danger={item.danger}
+            onClick={item.action}
+          />
+        </React.Fragment>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+
+function DbEdgeMenuItem({
+  label,
+  icon,
+  danger,
+  onClick,
+}: {
+  label: string;
+  icon: Parameters<typeof AppIcon>[0]["name"];
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  const [hov, setHov] = useState(false);
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "5px 12px 5px 10px",
+        cursor: "pointer",
+        background: hov
+          ? danger
+            ? "rgba(243,139,168,0.08)"
+            : "var(--bg-sidebar-active)"
+          : "transparent",
+        color: danger
+          ? "var(--ctp-red)"
+          : hov
+            ? "var(--text-primary)"
+            : "var(--text-secondary)",
+        fontSize: "var(--font-size-sm)",
+        transition: "var(--ease-fast)",
+        borderRadius: "var(--radius-xs)",
+        margin: "1px 4px",
+      }}
+    >
+      <span
+        style={{
+          display: "flex",
+          alignItems: "center",
+          flexShrink: 0,
+          opacity: danger ? 1 : 0.7,
+        }}
+      >
+        <AppIcon name={icon} size={13} strokeWidth={1.75} />
+      </span>
+      {label}
     </div>
   );
 }

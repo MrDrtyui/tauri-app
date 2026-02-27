@@ -13,6 +13,14 @@ import {
   type InfraConfig,
   type DeployImageRequest,
 } from "../store/tauriStore";
+import {
+  generatePostgresRawManifests,
+  generatePostgresStatefulSet,
+  generatePostgresSecret,
+  generatePostgresService,
+  generatePostgresNamespace,
+  type PostgresConfig,
+} from "../store/postgresStore";
 import { genId } from "../layout/utils";
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -851,6 +859,92 @@ export function AddFieldModal({ onClose, namespace }: Props) {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
+
+    // ── Postgres: use dedicated generator for proper Secret + StatefulSet ──
+    if (selPreset === "postgres") {
+      try {
+        const pgPassword =
+          envVars.find((e) => e.key === "POSTGRES_PASSWORD")?.value ??
+          "changeme";
+        const pgUser =
+          envVars.find((e) => e.key === "POSTGRES_USER")?.value ?? "postgres";
+        const pgDb =
+          envVars.find((e) => e.key === "POSTGRES_DB")?.value ?? "appdb";
+        const pgNamespace = "apps";
+        const pgCfg: PostgresConfig = {
+          fieldId: n,
+          name: n,
+          namespace: pgNamespace,
+          postgresVersion: "16-alpine",
+          databaseName: pgDb,
+          username: pgUser,
+          password: pgPassword,
+          port,
+          storageSize: preset.storageSize ?? "10Gi",
+          storageClass: "",
+          deployMode: "raw",
+          chartVersion: "",
+          enableMetrics: false,
+        };
+        setResult("Generating postgres files...");
+        // generatePostgresRawManifests returns project-relative paths:
+        //   "namespace.yaml"              → save at projectPath/namespace.yaml
+        //   "databases/n/n-secret.yaml"   → save at projectPath/databases/n/...
+        const manifests = generatePostgresRawManifests(pgCfg);
+        const saves = Object.entries(manifests).map(([rel, yaml]) =>
+          saveYamlFile(`${projectPath}/${rel}`, yaml),
+        );
+        await Promise.all(saves);
+
+        // Deploy only the databases/n dir (not the namespace.yaml separately)
+        const fieldDir = `${projectPath}/databases/${n}`;
+
+        // Ensure namespace exists first
+        await deployResource(
+          "namespace",
+          "raw",
+          projectPath,
+          pgNamespace,
+          {},
+        ).catch(() => {});
+
+        addNode({
+          id: genId("node"),
+          label: n,
+          kind: "StatefulSet",
+          image: preset.image,
+          type_id: "database",
+          namespace: pgNamespace,
+          file_path: `${fieldDir}/${n}-statefulset.yaml`,
+          replicas: 1,
+          source: "raw",
+          x: 20 + Math.random() * 40,
+          y: 20 + Math.random() * 40,
+        });
+        setResult("Deploying postgres to cluster...");
+        const deployResult = await deployResource(
+          n,
+          "raw",
+          fieldDir,
+          pgNamespace,
+        );
+        if (!deployResult.success) {
+          setResult(
+            `Error: ${deployResult.stderr?.split("\n")[0] ?? "deploy failed"}`,
+          );
+          setCreating(false);
+          return;
+        }
+        setResult("OK: PostgreSQL deployed");
+      } catch (e) {
+        setResult(`Error: ${String(e)}`);
+      }
+      setCreating(false);
+      setTimeout(onClose, 900);
+      return;
+    }
+    // ── end postgres special case ──────────────────────────────────────────
+
     const fieldConfig: FieldConfig = {
       id: n,
       label: n,
@@ -958,15 +1052,6 @@ export function AddFieldModal({ onClose, namespace }: Props) {
         file_path: `${projectPath}/infra/${n}/helm/Chart.yaml`,
         replicas: null,
         source: "helm",
-        helm: {
-          release_name: n,
-          namespace: genResult.namespace,
-          chart_name: helmPreset.chartName,
-          chart_version: helmPreset.version,
-          repo: helmPreset.repo,
-          values_path: `${projectPath}/infra/${n}/helm/values.yaml`,
-          rendered_dir: `${projectPath}/infra/${n}/rendered`,
-        },
         x: 20 + Math.random() * 40,
         y: 20 + Math.random() * 40,
       });

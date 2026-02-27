@@ -720,11 +720,24 @@ fn split_rendered_manifests(raw: &str) -> Vec<(String, String)> {
 // ─── YAML code generators ─────────────────────────────────────────────────────
 
 fn generate_deployment_yaml(cfg: &FieldConfig) -> String {
+    let secret_keys = ["PASSWORD", "SECRET", "KEY", "TOKEN", "PASS"];
+    let has_secret = cfg.env.iter()
+        .any(|e| secret_keys.iter().any(|k| e.key.to_uppercase().contains(k)));
+    let secret_name = format!("{}-secret", cfg.id);
+
     let env_block = if cfg.env.is_empty() {
         String::new()
     } else {
         let vars: String = cfg.env.iter().map(|e| {
-            format!("            - name: {}\n              value: \"{}\"\n", e.key, e.value)
+            let is_sensitive = secret_keys.iter().any(|k| e.key.to_uppercase().contains(k));
+            if is_sensitive && has_secret {
+                format!(
+                    "            - name: {key}\n              valueFrom:\n                secretKeyRef:\n                  name: {secret}\n                  key: {key}\n",
+                    key = e.key, secret = secret_name,
+                )
+            } else {
+                format!("            - name: {}\n              value: \"{}\"\n", e.key, e.value)
+            }
         }).collect();
         format!("          env:\n{}\n", vars)
     };
